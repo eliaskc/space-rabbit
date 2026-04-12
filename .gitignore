@@ -1,0 +1,18 @@
+# macOS files
+.DS_Store
+
+# Build resources
+Space Rabbit.app/
+Space Rabbit.dmg
+_dmg_staging/
+spacerabbit
+*.o
+*.dSYM/
+
+# Icons
+Icon/AppIcon.icns
+AppIcon.iconset/
+
+# Environment variables
+local.env
+.claude/settings.local.json
