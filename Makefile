@@ -11,7 +11,7 @@ SRC        = App/SpaceRabbit.swift
 BIN        = spacerabbit
 APP_NAME   = Space Rabbit
 APP_BUNDLE = $(APP_NAME).app
-DMG_NAME   = Space Rabbit.dmg
+DMG_NAME   = Space-Rabbit.dmg
 Q_BUNDLE   = "$(APP_BUNDLE)"
 Q_DMG      = "$(DMG_NAME)"
 ICNS       = Icon/AppIcon.icns
@@ -58,8 +58,8 @@ app: $(BIN) $(ICNS)
 	@echo "==> Built $(APP_BUNDLE)"
 
 dmg: app
-	@echo "==> Creating Space Rabbit.dmg..."
-	@rm -f "Space Rabbit.dmg"
+	@echo "==> Creating $(DMG_NAME)..."
+	@rm -f $(Q_DMG)
 	@mkdir -p _dmg_staging
 	@cp -r $(Q_BUNDLE) _dmg_staging/
 	@ln -sf /Applications _dmg_staging/Applications
@@ -67,9 +67,9 @@ dmg: app
 	    -volname "Space Rabbit $(VERSION)" \
 	    -srcfolder _dmg_staging \
 	    -ov -format UDZO \
-	    "Space Rabbit.dmg"
+	    $(Q_DMG)
 	@rm -rf _dmg_staging
-	@echo "==> Created Space Rabbit.dmg"
+	@echo "==> Created $(DMG_NAME)"
 
 notarize:
 	@echo "==> Notarizing $(DMG_NAME)..."
