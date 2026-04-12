@@ -35,12 +35,6 @@ make app
 
 Requires Xcode command line tools and a valid Developer ID for signing.
 
-You can configure your signing key by creating a `local.env` file and using:
-
-```bash
-export SIGN_ID=Developer ID Application: Your Developer Name (IDENTIFIER_HERE)
-```
-
 If you don't, you will be asked for your signature key identifier when building the app. 
 
 ## Release & notarize
@@ -51,6 +45,12 @@ Once tagged, you can build the `Space Rabbit.app`:
 
 ```bash
 make app
+```
+
+You can configure your signing key by creating a `local.env` file with eg.:
+
+```bash
+export SIGN_ID=Developer ID Application: Your Developer Name (IDENTIFIER_HERE)
 ```
 
 Finally, it needs to be packaged and notarized into `Space-Rabbit.dmg` as such:
