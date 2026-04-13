@@ -66,8 +66,7 @@ export SIGN_ID=Developer ID Application: Your Developer Name (IDENTIFIER_HERE)
 Finally, it needs to be packaged and notarized into `Space-Rabbit.dmg` as such:
 
 ```bash
-make dmg && \
-  make notarize
+make release
 ```
 
 When the final DMG has been packaged and notarized, simply draft a new release on [space-rabbit/releases](https://github.com/Tahul/space-rabbit/releases) and upload `Space-Rabbit.dmg`.
