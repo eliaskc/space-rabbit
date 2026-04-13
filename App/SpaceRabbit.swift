@@ -67,6 +67,7 @@ var gInstantSwitchEnabled: Bool         = true
 var gAutoFollowEnabled:    Bool         = true
 var gSoundsEnabled:        Bool         = false
 var gSwitchCount:          Int          = 0
+var gSwitchCountSaved:     Int          = 0
 var gKeyLeft:              Int64        = 123
 var gKeyRight:             Int64        = 124
 var gModMask:              CGEventFlags = .maskControl
@@ -116,6 +117,7 @@ final class SwoopMenu: NSObject {
         gAutoFollowEnabled    = ud.bool(forKey: "spacerabbit.autoFollow")
         gSoundsEnabled        = ud.bool(forKey: "spacerabbit.sounds")
         gSwitchCount          = ud.integer(forKey: "spacerabbit.switchCount")
+        gSwitchCountSaved     = gSwitchCount
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
@@ -376,7 +378,6 @@ final class SwoopMenu: NSObject {
 
     func recordSwitch() {
         gSwitchCount += 1
-        UserDefaults.standard.set(gSwitchCount, forKey: "spacerabbit.switchCount")
         updateStatsDisplay()
     }
 }
@@ -1195,6 +1196,14 @@ func checkForUpdates() {
     }.resume()
 }
 
+// MARK: - Persistence helpers
+
+func flushSwitchCount() {
+    guard gSwitchCount != gSwitchCountSaved else { return }
+    UserDefaults.standard.set(gSwitchCount, forKey: "spacerabbit.switchCount")
+    gSwitchCountSaved = gSwitchCount
+}
+
 // MARK: - Signal handler (must be a global C-compatible function)
 
 func onSignal(_ sig: Int32) {
@@ -1219,6 +1228,10 @@ loadSpaceSwitchShortcuts()
 gMenu = SwoopMenu()
 
 DispatchQueue.main.asyncAfter(deadline: .now() + 5) { checkForUpdates() }
+
+Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in
+    flushSwitchCount()
+}
 
 // Event tap
 let eventMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
@@ -1246,13 +1259,19 @@ NSWorkspace.shared.notificationCenter.addObserver(
     object: nil
 )
 
+// Cleanup on exit
+NotificationCenter.default.addObserver(
+    forName: NSApplication.willTerminateNotification,
+    object: nil, queue: .main
+) { _ in
+    flushSwitchCount()
+    NSWorkspace.shared.notificationCenter.removeObserver(observer)
+    CGEvent.tapEnable(tap: tap, enable: false)
+    CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+}
+
 signal(SIGINT,  onSignal)
 signal(SIGTERM, onSignal)
 
 print("Space Rabbit: running")
 app.run()
-
-// Cleanup
-NSWorkspace.shared.notificationCenter.removeObserver(observer)
-CGEvent.tapEnable(tap: tap, enable: false)
-CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
