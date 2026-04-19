@@ -6,7 +6,7 @@
  *
  *   1. Opens a small progress window and downloads the DMG from GitHub.
  *   2. Mounts the DMG, copies the new .app over the running bundle, unmounts.
- *   3. Prompts the user to restart (dismissible — the old version keeps running).
+ *   3. Prompts the user to restart (dismissible to keep old version running).
  *
  * On failure an alert offers "Try Again" or "Cancel".
  * Cancelling at any point leaves the "Update available" banner intact so
