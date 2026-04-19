@@ -25,67 +25,86 @@ import Darwin
 // These raw integer IDs identify private fields on CGEvent objects.
 // They are used to construct the synthetic DockSwipe gesture events
 // that trick the Dock into performing an instant (non-animated) space switch.
+//
+// To update these if Apple changes them, compare against the CGSInternal
+// headers or reverse-engineer the Dock's event handling.
 
-/// Internal event type discriminator (gesture vs. dock-control vs. normal input).
+/// Internal event type discriminator.
+/// Distinguishes gesture events, dock-control events, and normal input events.
 let kCGSEventTypeField            = CGEventField(rawValue: 55)!
 
-/// Identifies the HID gesture type (e.g. DockSwipe = 23).
+/// Identifies the HID gesture type.
+/// For space switching, this is set to `kIOHIDEventTypeDockSwipe` (23).
 let kCGEventGestureHIDType        = CGEventField(rawValue: 110)!
 
-/// Vertical scroll component of the gesture (set to 0 for horizontal swipes).
+/// Vertical scroll component of the gesture.
+/// Set to 0 for horizontal swipes (space switching is purely horizontal).
 let kCGEventGestureScrollY        = CGEventField(rawValue: 119)!
 
-/// Indicates whether the gesture involves a swipe motion (1 = yes).
+/// Indicates whether the gesture involves a swipe motion.
+/// Set to 1 (true) for all space-switch gestures.
 let kCGEventGestureSwipeMotion    = CGEventField(rawValue: 123)!
 
-/// How far the swipe has progressed (+-2.0 triggers an immediate switch).
+/// How far the swipe has progressed.
+/// Values of +-2.0 indicate a fully committed swipe that should switch immediately.
 let kCGEventGestureSwipeProgress  = CGEventField(rawValue: 124)!
 
-/// Horizontal velocity of the swipe (+-400 is high enough to be "instant").
+/// Horizontal velocity of the swipe.
+/// Values of +-400 are well above the Dock's threshold for "instant" switching.
 let kCGEventGestureSwipeVelocityX = CGEventField(rawValue: 129)!
 
-/// Vertical velocity of the swipe (set to 0 for horizontal swipes).
+/// Vertical velocity of the swipe.
+/// Set to 0 for horizontal swipes.
 let kCGEventGestureSwipeVelocityY = CGEventField(rawValue: 130)!
 
-/// The phase of the gesture (began = 1, ended = 4).
+/// The phase of the gesture lifecycle.
+/// Began (1) signals the start; Ended (4) signals completion with final velocity.
 let kCGEventGesturePhase          = CGEventField(rawValue: 132)!
 
-/// Bitfield that encodes the swipe direction (0 = left, 1 = right).
+/// Bitfield encoding the swipe direction.
+/// 0 = swipe left (move to previous space), 1 = swipe right (move to next space).
 let kCGEventScrollGestureFlagBits = CGEventField(rawValue: 135)!
 
-/// Zoom/delta field repurposed to carry a non-zero epsilon value
-/// (prevents the Dock from ignoring the gesture).
+/// Zoom/delta field repurposed to carry a non-zero epsilon value.
+/// The Dock checks this field and ignores the gesture if it's exactly zero.
+/// Setting it to `Float.leastNonzeroMagnitude` satisfies the check.
 let kCGEventGestureZoomDeltaX     = CGEventField(rawValue: 139)!
 
 // MARK: - Undocumented Event Type Constants
+//
+// These integer values identify specific event subtypes used in the
+// synthetic gesture events. They correspond to internal HID and CGS enums.
 
 /// HID event type for a Dock swipe gesture.
 let kIOHIDEventTypeDockSwipe: Int64 = 23
 
-/// CGS event subtype: generic gesture.
+/// CGS event subtype: generic gesture (acts as the envelope event).
 let kCGSEventGesture:         Int64 = 29
 
-/// CGS event subtype: Dock control gesture (triggers the space switch).
+/// CGS event subtype: Dock control gesture (carries the actual swipe payload).
 let kCGSEventDockControl:     Int64 = 30
 
-/// Gesture phase: the swipe just started.
+/// Gesture phase: the swipe has just started (no velocity yet).
 let kCGSGesturePhaseBegan:    Int64 = 1
 
-/// Gesture phase: the swipe has ended (this is when velocity/progress matter).
+/// Gesture phase: the swipe has ended (velocity and progress are evaluated).
 let kCGSGesturePhaseEnded:    Int64 = 4
 
 // MARK: - CGS Type Aliases
 
-/// Opaque connection handle returned by CGSMainConnectionID.
+/// Opaque connection handle returned by `CGSMainConnectionID`.
+/// Represents the current login session's connection to the window server.
 typealias CGSConnectionID = Int32
 
 /// 64-bit identifier for a single Space (virtual desktop).
+/// Each space on each display has a unique ID assigned by the window server.
 typealias CGSSpaceID      = UInt64
 
 // MARK: - Private CGS Function Signatures
 //
 // These are the C calling-convention signatures of the private functions
-// we resolve at runtime. Each typedef matches the actual symbol's ABI.
+// we resolve at runtime. Each typedef matches the actual symbol's ABI
+// so that `unsafeBitCast` produces a callable function pointer.
 
 /// `CGSMainConnectionID() -> CGSConnectionID`
 /// Returns the connection ID for the current login session.
@@ -97,10 +116,12 @@ typealias FnActiveSpace      = @convention(c) (CGSConnectionID) -> CGSSpaceID
 
 /// `CGSCopyManagedDisplaySpaces(cid, displayUUID?) -> CFArray?`
 /// Returns an array of dictionaries describing every display and its spaces.
+/// Pass `nil` for the display UUID to get all displays.
 typealias FnDisplaySpaces    = @convention(c) (CGSConnectionID, CFString?) -> Unmanaged<CFArray>?
 
-/// `SLSCopySpacesForWindows(cid, type, windowIDs) -> CFArray?`
+/// `SLSCopySpacesForWindows(cid, spaceType, windowIDs) -> CFArray?`
 /// Maps an array of window IDs to the space IDs they belong to.
+/// `spaceType` is a bitmask (7 = all space types).
 typealias FnSpacesForWindows = @convention(c) (CGSConnectionID, Int32, CFArray) -> Unmanaged<CFArray>?
 
 // MARK: - Runtime Symbol Resolution
@@ -110,23 +131,28 @@ typealias FnSpacesForWindows = @convention(c) (CGSConnectionID, Int32, CFArray) 
 // in a future macOS version), the corresponding variable will be nil
 // and the features that depend on it will gracefully no-op.
 
-/// `RTLD_DEFAULT` — search all loaded images (equivalent to `(void *)-2` on macOS).
+/// `RTLD_DEFAULT` — search all loaded images for the symbol.
+/// This is the macOS equivalent of `(void *)-2`, which tells dlsym
+/// to search every loaded dynamic library in the process.
 private let rtldDefault = UnsafeMutableRawPointer(bitPattern: -2 as Int)
 
 /// Resolves a C symbol by name and casts it to the requested function type.
-private func loadSym<T>(_ name: String) -> T? {
+///
+/// - Parameter name: The mangled symbol name (e.g. "CGSMainConnectionID").
+/// - Returns: A callable function pointer, or `nil` if the symbol was not found.
+private func loadSymbol<T>(_ name: String) -> T? {
     guard let ptr = dlsym(rtldDefault, name) else { return nil }
     return unsafeBitCast(ptr, to: T.self)
 }
 
 /// Returns the CGS connection ID for the current session.
-let cgsMainConnection:       FnMainConnection?   = loadSym("CGSMainConnectionID")
+let cgsMainConnection:       FnMainConnection?   = loadSymbol("CGSMainConnectionID")
 
 /// Returns the active space ID on the main display.
-let cgsGetActiveSpace:       FnActiveSpace?       = loadSym("CGSGetActiveSpace")
+let cgsGetActiveSpace:       FnActiveSpace?       = loadSymbol("CGSGetActiveSpace")
 
 /// Lists all displays and their associated spaces.
-let cgsCopyDisplaySpaces:    FnDisplaySpaces?     = loadSym("CGSCopyManagedDisplaySpaces")
+let cgsCopyDisplaySpaces:    FnDisplaySpaces?     = loadSymbol("CGSCopyManagedDisplaySpaces")
 
 /// Maps window IDs to the spaces they live on.
-let slsCopySpacesForWindows: FnSpacesForWindows?  = loadSym("SLSCopySpacesForWindows")
+let slsCopySpacesForWindows: FnSpacesForWindows?  = loadSymbol("SLSCopySpacesForWindows")

@@ -13,9 +13,37 @@
 import AppKit
 import ServiceManagement
 
+// MARK: - Layout Constants
+
+/// Centralizes all layout values used across the settings UI.
+/// Keeps spacing, sizing, and padding consistent and easy to tweak.
+private enum Layout {
+    static let windowWidth:       CGFloat = 480
+    static let windowMinHeight:   CGFloat = 200
+    static let outerPadding:      CGFloat = 20
+    static let topPadding:        CGFloat = 16
+    static let bottomPadding:     CGFloat = 16
+    static let sectionSpacing:    CGFloat = 6
+    static let groupGapSpacing:   CGFloat = 14
+    static let rowHorizontalPad:  CGFloat = 8
+    static let rowVerticalPad:    CGFloat = 12
+    static let rowIconSize:       CGFloat = 24
+    static let iconSymbolSize:    CGFloat = 11
+    static let iconCornerRadius:  CGFloat = 6
+    static let groupCornerRadius: CGFloat = 8
+    static let groupBorderWidth:  CGFloat = 0.5
+    static let aboutTopPadding:   CGFloat = 24
+    static let aboutBottomPad:    CGFloat = 24
+    static let aboutIconSize:     CGFloat = 80
+    static let aboutSpacing:      CGFloat = 20
+}
+
 // MARK: - Tab View Controller
 
 /// Manages the toolbar tabs and resizes the window to fit each tab's content.
+///
+/// When the user switches tabs, the window smoothly resizes to match the
+/// new tab's intrinsic content size, keeping the title bar anchored at the top.
 final class PreferencesTabViewController: NSTabViewController {
 
     override func viewDidAppear() {
@@ -30,7 +58,12 @@ final class PreferencesTabViewController: NSTabViewController {
         applyWindowSize(for: item, animate: true)
     }
 
-    /// Re-applies the window size for the current tab (e.g. after showing/hiding a banner).
+    /// Re-applies the window size for the current tab.
+    ///
+    /// Call this after showing/hiding dynamic content (e.g. warning banners)
+    /// so the window adjusts to the new content height.
+    ///
+    /// - Parameter animate: Whether to animate the resize transition.
     func resizeCurrent(animate: Bool = true) {
         let item = tabViewItems[selectedTabViewItemIndex]
         applyWindowSize(for: item, animate: animate)
@@ -39,15 +72,19 @@ final class PreferencesTabViewController: NSTabViewController {
     /// Resizes the window to fit the given tab's content, keeping the
     /// title bar anchored at the top (origin.y shifts to compensate).
     private func applyWindowSize(for item: NSTabViewItem, animate: Bool) {
-        guard let vc = item.viewController, let window = view.window else { return }
-        vc.view.layoutSubtreeIfNeeded()
+        guard let viewController = item.viewController,
+              let window = view.window else { return }
+
+        viewController.view.layoutSubtreeIfNeeded()
         window.title = item.label
 
-        let contentSize = vc.view.fittingSize
-        var frame       = window.frame
-        let newHeight   = window.frameRect(forContentRect: NSRect(origin: .zero, size: contentSize)).height
+        let contentSize = viewController.view.fittingSize
+        let contentRect = NSRect(origin: .zero, size: contentSize)
+        let newHeight   = window.frameRect(forContentRect: contentRect).height
 
         // Anchor the top edge: shift origin down by the height difference
+        // so the window grows/shrinks from the bottom
+        var frame         = window.frame
         frame.origin.y   += frame.height - newHeight
         frame.size.height = newHeight
         window.setFrame(frame, display: true, animate: animate)
@@ -57,8 +94,14 @@ final class PreferencesTabViewController: NSTabViewController {
 // MARK: - Settings Window Controller
 
 /// Singleton that owns and shows the preferences window.
+///
+/// The window is created lazily on first `show()` call and reused
+/// for subsequent invocations. It is not released when closed, so
+/// user selections (active tab) are preserved.
 final class SettingsWindowController: NSObject, NSWindowDelegate {
+
     static let shared = SettingsWindowController()
+
     private var window: NSWindow?
 
     /// Shows the settings window, creating it on first call.
@@ -69,42 +112,51 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// Constructs the preferences window with its tab view controller.
     private func makeWindow() -> NSWindow {
         let tabVC = PreferencesTabViewController()
         tabVC.tabStyle = .toolbar
 
-        // General tab: toggles and system settings
+        // General tab: launch at login, feature toggles, sounds, Dock settings
         let generalItem = NSTabViewItem(viewController: GeneralViewController())
         generalItem.label = "General"
-        generalItem.image = NSImage(systemSymbolName: "togglepower", accessibilityDescription: nil)
+        generalItem.image = NSImage(systemSymbolName: "togglepower",
+                                    accessibilityDescription: nil)
         tabVC.addTabViewItem(generalItem)
 
-        // About tab: app info, authors, update notice
+        // About tab: app info, version, authors, update notice
         let aboutItem = NSTabViewItem(viewController: AboutViewController())
         aboutItem.label = "About"
-        aboutItem.image = NSImage(systemSymbolName: "hare", accessibilityDescription: nil)
+        aboutItem.image = NSImage(systemSymbolName: "hare",
+                                  accessibilityDescription: nil)
         tabVC.addTabViewItem(aboutItem)
 
-        let w = NSWindow(
+        let window = NSWindow(
             contentRect: .zero,
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        w.isReleasedWhenClosed = false
-        w.delegate = self
-        w.contentViewController = tabVC
-        return w
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.contentViewController = tabVC
+        return window
     }
 }
 
 // MARK: - General Tab
 
 /// The "General" preferences tab with all runtime settings.
+///
+/// Organized into four groups:
+///   1. Auto-start — Launch at Login
+///   2. Features   — Instant space switch, Auto-follow
+///   3. Interface  — Sounds
+///   4. Advanced   — Dock instant-hide
 final class GeneralViewController: NSViewController {
 
-    /// When true, the launch-at-login row will flash on next appearance
-    /// (set by the menu bar warning banner to draw attention).
+    /// When `true`, the launch-at-login row will flash on next appearance.
+    /// Set by the menu bar warning banner to draw attention to the setting.
     static var pendingLaunchAtLoginAlert = false
 
     // MARK: Controls
@@ -126,51 +178,51 @@ final class GeneralViewController: NSViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        // Create all toggle switches
+        // Create all toggle switches wired to their respective actions
         instantSwitchControl   = makeSwitch(gInstantSwitchEnabled, #selector(toggleInstantSwitch))
         autoFollowControl      = makeSwitch(gAutoFollowEnabled,    #selector(toggleAutoFollow))
         soundsControl          = makeSwitch(gSoundsEnabled,        #selector(toggleSounds))
-        launchAtLoginControl   = makeSwitch(false,                  #selector(toggleLaunchAtLogin))
+        launchAtLoginControl   = makeSwitch(false,                 #selector(toggleLaunchAtLogin))
 
         // Status label shown below the launch-at-login toggle when there's an issue
-        launchStatusLabel                         = NSTextField(wrappingLabelWithString: "")
+        launchStatusLabel = NSTextField(wrappingLabelWithString: "")
         launchStatusLabel.font                    = .systemFont(ofSize: 11)
         launchStatusLabel.textColor               = .secondaryLabelColor
         launchStatusLabel.preferredMaxLayoutWidth = 240
         launchStatusLabel.isHidden                = true
 
         // --- Group 1: Launch at Login ---
-        let group1 = groupContainer()
-        group1.addArrangedSubview(settingsRow(
-            symbol: "gearshape.2.fill",
-            color:  NSColor(red: 0.55, green: 0.55, blue: 0.60, alpha: 1),
-            label:  "Launch at login",
+        let autoStartGroup = groupContainer()
+        autoStartGroup.addArrangedSubview(settingsRow(
+            symbol:  "gearshape.2.fill",
+            color:   NSColor(red: 0.55, green: 0.55, blue: 0.60, alpha: 1),
+            label:   "Launch at login",
             control: launchAtLoginControl,
             subtitle: launchStatusLabel
         ))
 
         // --- Group 2: Feature Toggles ---
-        let group2 = groupContainer()
-        group2.addArrangedSubview(settingsRow(
-            symbol: "arrow.left.arrow.right",
-            color:  NSColor(red: 0.20, green: 0.55, blue: 1.00, alpha: 1),
-            label:  "Instant space switch",
+        let featuresGroup = groupContainer()
+        featuresGroup.addArrangedSubview(settingsRow(
+            symbol:  "arrow.left.arrow.right",
+            color:   NSColor(red: 0.20, green: 0.55, blue: 1.00, alpha: 1),
+            label:   "Instant space switch",
             control: instantSwitchControl
         ))
-        group2.addArrangedSubview(rowDivider())
-        group2.addArrangedSubview(settingsRow(
-            symbol: "scope",
-            color:  NSColor(red: 0.35, green: 0.75, blue: 0.40, alpha: 1),
-            label:  "Auto-follow on \u{2318}\u{21E5}",
+        featuresGroup.addArrangedSubview(rowDivider())
+        featuresGroup.addArrangedSubview(settingsRow(
+            symbol:  "scope",
+            color:   NSColor(red: 0.35, green: 0.75, blue: 0.40, alpha: 1),
+            label:   "Auto-follow on \u{2318}\u{21E5}",
             control: autoFollowControl
         ))
 
         // --- Group 3: Interface ---
-        let group3 = groupContainer()
-        group3.addArrangedSubview(settingsRow(
-            symbol: "speaker.wave.2.fill",
-            color:  NSColor(red: 0.60, green: 0.35, blue: 0.85, alpha: 1),
-            label:  "Enable sounds",
+        let interfaceGroup = groupContainer()
+        interfaceGroup.addArrangedSubview(settingsRow(
+            symbol:  "speaker.wave.2.fill",
+            color:   NSColor(red: 0.60, green: 0.35, blue: 0.85, alpha: 1),
+            label:   "Enable sounds",
             control: soundsControl
         ))
 
@@ -178,15 +230,48 @@ final class GeneralViewController: NSViewController {
         launchWarningBanner = makeLaunchWarningBanner()
 
         // --- Group 4: Advanced (Dock instant-hide) ---
-        let dockSubtitle                     = NSTextField(wrappingLabelWithString:
+        let advancedGroup = buildAdvancedGroup()
+
+        // --- Assemble the outer layout ---
+        let outerStack = buildOuterStack(
+            autoStartGroup: autoStartGroup,
+            featuresGroup:  featuresGroup,
+            interfaceGroup: interfaceGroup,
+            advancedGroup:  advancedGroup
+        )
+
+        view.addSubview(outerStack)
+        NSLayoutConstraint.activate([
+            outerStack.topAnchor.constraint(equalTo: view.topAnchor,
+                                            constant: Layout.topPadding),
+            outerStack.leadingAnchor.constraint(equalTo: view.leadingAnchor,
+                                                constant: Layout.outerPadding),
+            outerStack.trailingAnchor.constraint(equalTo: view.trailingAnchor,
+                                                 constant: -Layout.outerPadding),
+            outerStack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor,
+                                               constant: -Layout.bottomPadding),
+            view.widthAnchor.constraint(equalToConstant: Layout.windowWidth),
+            view.heightAnchor.constraint(greaterThanOrEqualToConstant: Layout.windowMinHeight),
+        ])
+
+        updateLaunchAtLoginUI()
+    }
+
+    /// Builds the "Advanced" group containing the Dock instant-hide toggle
+    /// and a conditional "Reset to system default" link.
+    private func buildAdvancedGroup() -> NSStackView {
+        let dockSubtitle = NSTextField(wrappingLabelWithString:
             "This changes a global macOS setting.")
         dockSubtitle.font                    = .systemFont(ofSize: 11)
         dockSubtitle.textColor               = .secondaryLabelColor
         dockSubtitle.preferredMaxLayoutWidth = 240
 
-        instantDockHideControl = makeSwitch(isDockInstantHideEnabled(), #selector(toggleDockInstantHide))
+        instantDockHideControl = makeSwitch(
+            isDockInstantHideEnabled(),
+            #selector(toggleDockInstantHide)
+        )
 
-        // "Reset to system default" link button
+        // "Reset to system default" link button (only visible when overridden)
         let resetBtn = LinkButton(title: "", target: self, action: #selector(resetDockToDefault))
         resetBtn.isBordered = false
         resetBtn.attributedTitle = NSAttributedString(string: "Reset to system default", attributes: [
@@ -195,8 +280,8 @@ final class GeneralViewController: NSViewController {
         ])
 
         let resetIcon = NSImageView()
-        resetIcon.image            = NSImage(systemSymbolName: "arrow.clockwise",
-                                             accessibilityDescription: nil)?
+        resetIcon.image = NSImage(systemSymbolName: "arrow.clockwise",
+                                  accessibilityDescription: nil)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .regular))
         resetIcon.contentTintColor = .linkColor
 
@@ -209,7 +294,8 @@ final class GeneralViewController: NSViewController {
         let resetRowView = NSView()
         resetRowView.addSubview(resetStack)
         NSLayoutConstraint.activate([
-            resetStack.trailingAnchor.constraint(equalTo: resetRowView.trailingAnchor, constant: -8),
+            resetStack.trailingAnchor.constraint(equalTo: resetRowView.trailingAnchor,
+                                                 constant: -Layout.rowHorizontalPad),
             resetStack.topAnchor.constraint(equalTo: resetRowView.topAnchor, constant: 4),
             resetStack.bottomAnchor.constraint(equalTo: resetRowView.bottomAnchor, constant: -7),
         ])
@@ -221,57 +307,54 @@ final class GeneralViewController: NSViewController {
         dockResetDivider.isHidden = true
         dockResetRow.isHidden     = true
 
-        let group4 = groupContainer()
-        group4.addArrangedSubview(settingsRow(
+        let group = groupContainer()
+        group.addArrangedSubview(settingsRow(
             symbol:   "dock.rectangle",
             color:    NSColor(red: 0.85, green: 0.50, blue: 0.15, alpha: 1),
             label:    "Instant Dock hide",
             control:  instantDockHideControl,
             subtitle: dockSubtitle
         ))
-        group4.addArrangedSubview(dockResetDivider)
-        group4.addArrangedSubview(dockResetRow)
+        group.addArrangedSubview(dockResetDivider)
+        group.addArrangedSubview(dockResetRow)
+        return group
+    }
 
-        // --- Assemble the outer layout ---
+    /// Assembles the outer vertical stack with all section titles and groups.
+    private func buildOuterStack(autoStartGroup: NSStackView,
+                                 featuresGroup: NSStackView,
+                                 interfaceGroup: NSStackView,
+                                 advancedGroup: NSStackView) -> NSStackView {
         let outerStack = NSStackView()
         outerStack.orientation = .vertical
         outerStack.alignment   = .leading
-        outerStack.spacing     = 6
+        outerStack.spacing     = Layout.sectionSpacing
         outerStack.translatesAutoresizingMaskIntoConstraints = false
 
         outerStack.addArrangedSubview(launchWarningBanner)
-        outerStack.setCustomSpacing(14, after: launchWarningBanner)
+        outerStack.setCustomSpacing(Layout.groupGapSpacing, after: launchWarningBanner)
         outerStack.addArrangedSubview(sectionTitle("Auto-start"))
-        outerStack.addArrangedSubview(group1)
-        outerStack.setCustomSpacing(14, after: group1)
+        outerStack.addArrangedSubview(autoStartGroup)
+        outerStack.setCustomSpacing(Layout.groupGapSpacing, after: autoStartGroup)
         outerStack.addArrangedSubview(sectionTitle("Features"))
-        outerStack.addArrangedSubview(group2)
-        outerStack.setCustomSpacing(14, after: group2)
+        outerStack.addArrangedSubview(featuresGroup)
+        outerStack.setCustomSpacing(Layout.groupGapSpacing, after: featuresGroup)
         outerStack.addArrangedSubview(sectionTitle("Interface"))
-        outerStack.addArrangedSubview(group3)
-        outerStack.setCustomSpacing(14, after: group3)
+        outerStack.addArrangedSubview(interfaceGroup)
+        outerStack.setCustomSpacing(Layout.groupGapSpacing, after: interfaceGroup)
         outerStack.addArrangedSubview(sectionTitle("Advanced"))
-        outerStack.addArrangedSubview(group4)
+        outerStack.addArrangedSubview(advancedGroup)
 
-        // Make all groups stretch to full width
-        for sub in [launchWarningBanner!, group1, group2, group3, group4] {
-            sub.translatesAutoresizingMaskIntoConstraints = false
+        // Make all groups stretch to the full width of the outer stack
+        for subview in [launchWarningBanner!, autoStartGroup, featuresGroup,
+                        interfaceGroup, advancedGroup] {
+            subview.translatesAutoresizingMaskIntoConstraints = false
             outerStack.addConstraint(
-                sub.trailingAnchor.constraint(equalTo: outerStack.trailingAnchor)
+                subview.trailingAnchor.constraint(equalTo: outerStack.trailingAnchor)
             )
         }
 
-        view.addSubview(outerStack)
-        NSLayoutConstraint.activate([
-            outerStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
-            outerStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            outerStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            outerStack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -16),
-            view.widthAnchor.constraint(equalToConstant: 480),
-            view.heightAnchor.constraint(greaterThanOrEqualToConstant: 200),
-        ])
-
-        updateLaunchAtLoginUI()
+        return outerStack
     }
 
     // MARK: View Lifecycle
@@ -279,25 +362,32 @@ final class GeneralViewController: NSViewController {
     override func viewWillAppear() {
         super.viewWillAppear()
 
-        // Refresh all toggle states (they may have been changed via the menu bar)
-        instantSwitchControl.state   = gInstantSwitchEnabled     ? .on : .off
-        autoFollowControl.state      = gAutoFollowEnabled        ? .on : .off
-        soundsControl.state          = gSoundsEnabled            ? .on : .off
+        // Refresh all toggle states — they may have been changed via the menu bar
+        // while the settings window was closed
+        instantSwitchControl.state   = gInstantSwitchEnabled      ? .on : .off
+        autoFollowControl.state      = gAutoFollowEnabled         ? .on : .off
+        soundsControl.state          = gSoundsEnabled             ? .on : .off
         instantDockHideControl.state = isDockInstantHideEnabled() ? .on : .off
         updateDockResetLink()
         updateLaunchAtLoginUI()
 
-        // If the user arrived here from the menu bar warning, flash the banner
+        // If the user arrived here from the menu bar warning banner,
+        // flash the banner to draw attention to the launch-at-login setting
         if GeneralViewController.pendingLaunchAtLoginAlert {
             GeneralViewController.pendingLaunchAtLoginAlert = false
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.35
-                launchWarningBanner.animator().alphaValue = 0.2
-            } completionHandler: {
-                NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = 0.35
-                    self.launchWarningBanner.animator().alphaValue = 1.0
-                }
+            flashLaunchWarningBanner()
+        }
+    }
+
+    /// Plays a brief fade-out/fade-in animation on the launch warning banner.
+    private func flashLaunchWarningBanner() {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.35
+            launchWarningBanner.animator().alphaValue = 0.2
+        } completionHandler: {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.35
+                self.launchWarningBanner.animator().alphaValue = 1.0
             }
         }
     }
@@ -305,6 +395,17 @@ final class GeneralViewController: NSViewController {
     // MARK: - Row Builder Helpers
 
     /// Creates a standard settings row: colored icon | label (+ optional subtitle) | control.
+    ///
+    /// The row uses horizontal stack layout with the control pushed to the
+    /// trailing edge via a flexible spacer.
+    ///
+    /// - Parameters:
+    ///   - symbol: SF Symbol name for the row icon.
+    ///   - color: Background color for the icon's rounded square.
+    ///   - label: Primary text label for the setting.
+    ///   - control: The interactive control (typically an `NSSwitch`).
+    ///   - subtitle: Optional secondary label shown below the primary label.
+    /// - Returns: A configured `NSView` ready to add to a group container.
     private func settingsRow(symbol: String, color: NSColor, label: String,
                              control: NSView, subtitle: NSTextField? = nil) -> NSView {
         let icon = makeIconView(symbol: symbol, color: color)
@@ -317,26 +418,29 @@ final class GeneralViewController: NSViewController {
         textStack.spacing     = 2
         textStack.alignment   = .leading
         textStack.addArrangedSubview(labelField)
-        if let sub = subtitle { textStack.addArrangedSubview(sub) }
+        if let subtitle = subtitle { textStack.addArrangedSubview(subtitle) }
 
         let row = NSStackView()
-        row.orientation  = .horizontal
-        row.spacing      = 10
-        row.alignment    = .centerY
-        row.edgeInsets   = NSEdgeInsets(top: 12, left: 8, bottom: 12, right: 8)
+        row.orientation = .horizontal
+        row.spacing     = 10
+        row.alignment   = .centerY
+        row.edgeInsets  = NSEdgeInsets(top: Layout.rowVerticalPad, left: Layout.rowHorizontalPad,
+                                       bottom: Layout.rowVerticalPad, right: Layout.rowHorizontalPad)
         row.addArrangedSubview(icon)
         row.addArrangedSubview(textStack)
         row.addArrangedSubview(NSView())   // Flexible spacer pushes the control to the right
         row.addArrangedSubview(control)
 
         NSLayoutConstraint.activate([
-            icon.widthAnchor.constraint(equalToConstant: 24),
-            icon.heightAnchor.constraint(equalToConstant: 24),
+            icon.widthAnchor.constraint(equalToConstant: Layout.rowIconSize),
+            icon.heightAnchor.constraint(equalToConstant: Layout.rowIconSize),
         ])
         return row
     }
 
     /// Creates a rounded, bordered container for grouping related settings rows.
+    ///
+    /// Uses a subtle background tint and thin border that adapts to light/dark mode.
     private func groupContainer() -> NSStackView {
         let isDark  = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let bgColor = isDark ? NSColor(white: 1, alpha: 0.02) : NSColor(white: 0, alpha: 0.02)
@@ -345,31 +449,41 @@ final class GeneralViewController: NSViewController {
         stack.orientation = .vertical
         stack.spacing     = 0
         stack.wantsLayer  = true
-        stack.layer?.cornerRadius    = 8
-        stack.layer?.borderWidth     = 0.5
+        stack.layer?.cornerRadius    = Layout.groupCornerRadius
+        stack.layer?.borderWidth     = Layout.groupBorderWidth
         stack.layer?.borderColor     = NSColor.separatorColor.cgColor
         stack.layer?.backgroundColor = bgColor.cgColor
         return stack
     }
 
-    /// Creates a small colored square with an SF Symbol icon inside (used as row icons).
+    /// Creates a small colored square with an SF Symbol icon inside.
+    ///
+    /// These are the rounded-rect badges shown to the left of each settings row,
+    /// similar to the icon style used in Apple's System Settings.
+    ///
+    /// - Parameters:
+    ///   - symbol: SF Symbol name.
+    ///   - color: Background color for the rounded square.
+    /// - Returns: A fixed-size view containing the centered icon.
     private func makeIconView(symbol: String, color: NSColor) -> NSView {
         let container = NSView()
-        container.wantsLayer    = true
-        container.layer?.backgroundColor = color.cgColor
-        container.layer?.cornerRadius    = 6
+        container.wantsLayer               = true
+        container.layer?.backgroundColor   = color.cgColor
+        container.layer?.cornerRadius      = Layout.iconCornerRadius
 
-        let cfg     = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
-        let imgView = NSImageView()
-        imgView.image              = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(cfg)
-        imgView.contentTintColor   = .white
-        imgView.translatesAutoresizingMaskIntoConstraints = false
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: Layout.iconSymbolSize,
+                                                       weight: .medium)
+        let imageView = NSImageView()
+        imageView.image            = NSImage(systemSymbolName: symbol,
+                                             accessibilityDescription: nil)?
+            .withSymbolConfiguration(symbolConfig)
+        imageView.contentTintColor = .white
+        imageView.translatesAutoresizingMaskIntoConstraints = false
 
-        container.addSubview(imgView)
+        container.addSubview(imageView)
         NSLayoutConstraint.activate([
-            imgView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            imgView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            imageView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            imageView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
         ])
         return container
     }
@@ -384,7 +498,8 @@ final class GeneralViewController: NSViewController {
         let container = NSView()
         container.addSubview(label)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor,
+                                           constant: Layout.rowHorizontalPad),
             label.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             label.topAnchor.constraint(equalTo: container.topAnchor),
             label.bottomAnchor.constraint(equalTo: container.bottomAnchor),
@@ -399,32 +514,40 @@ final class GeneralViewController: NSViewController {
         return box
     }
 
-    /// Creates a mini NSSwitch pre-configured with the given state and action.
+    /// Creates a mini `NSSwitch` pre-configured with the given state and action.
+    ///
+    /// - Parameters:
+    ///   - state: Initial on/off state.
+    ///   - action: Selector to call when the switch is toggled.
+    /// - Returns: A configured `NSSwitch` targeting `self`.
     private func makeSwitch(_ state: Bool, _ action: Selector) -> NSSwitch {
-        let s = NSSwitch()
-        s.controlSize = .mini
-        s.state       = state ? .on : .off
-        s.target      = self
-        s.action      = action
-        return s
+        let toggle = NSSwitch()
+        toggle.controlSize = .mini
+        toggle.state       = state ? .on : .off
+        toggle.target      = self
+        toggle.action      = action
+        return toggle
     }
 
     /// Creates the orange warning banner shown when launch-at-login is disabled.
+    ///
+    /// The banner includes a warning icon and explanatory text, styled with
+    /// an orange tint to draw attention.
     private func makeLaunchWarningBanner() -> NSView {
         let container = NSView()
-        container.wantsLayer              = true
-        container.layer?.cornerRadius     = 8
-        container.layer?.borderWidth      = 0.5
-        container.layer?.backgroundColor  = NSColor.systemOrange.withAlphaComponent(0.05).cgColor
-        container.layer?.borderColor      = NSColor.systemOrange.withAlphaComponent(0.20).cgColor
+        container.wantsLayer             = true
+        container.layer?.cornerRadius    = Layout.groupCornerRadius
+        container.layer?.borderWidth     = Layout.groupBorderWidth
+        container.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.05).cgColor
+        container.layer?.borderColor     = NSColor.systemOrange.withAlphaComponent(0.20).cgColor
 
-        let cfg     = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
-        let imgView = NSImageView()
-        imgView.image            = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
-                                           accessibilityDescription: nil)?
-            .withSymbolConfiguration(cfg)
-        imgView.contentTintColor = .systemOrange
-        imgView.translatesAutoresizingMaskIntoConstraints = false
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+        let iconView = NSImageView()
+        iconView.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
+                                 accessibilityDescription: nil)?
+            .withSymbolConfiguration(symbolConfig)
+        iconView.contentTintColor = .systemOrange
+        iconView.translatesAutoresizingMaskIntoConstraints = false
 
         let label = NSTextField(wrappingLabelWithString:
             "Space Rabbit is not set to launch at login. Enable \u{201C}Launch at login\u{201D} below so it starts automatically.")
@@ -432,14 +555,14 @@ final class GeneralViewController: NSViewController {
         label.textColor = NSColor.systemOrange
         label.translatesAutoresizingMaskIntoConstraints = false
 
-        container.addSubview(imgView)
+        container.addSubview(iconView)
         container.addSubview(label)
         NSLayoutConstraint.activate([
-            imgView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            imgView.topAnchor.constraint(equalTo: container.topAnchor, constant: 11),
-            imgView.widthAnchor.constraint(equalToConstant: 15),
-            imgView.heightAnchor.constraint(equalToConstant: 15),
-            label.leadingAnchor.constraint(equalTo: imgView.trailingAnchor, constant: 8),
+            iconView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            iconView.topAnchor.constraint(equalTo: container.topAnchor, constant: 11),
+            iconView.widthAnchor.constraint(equalToConstant: 15),
+            iconView.heightAnchor.constraint(equalToConstant: 15),
+            label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
             label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
             label.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
             label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
@@ -450,7 +573,11 @@ final class GeneralViewController: NSViewController {
     // MARK: - Launch at Login
 
     /// Updates the launch-at-login switch, status label, and warning banner
-    /// to reflect the current SMAppService registration state.
+    /// to reflect the current `SMAppService` registration state.
+    ///
+    /// - Parameter errorMessage: Optional error text to display below the toggle.
+    ///   When `nil`, the status label is hidden unless the system reports
+    ///   `requiresApproval` status.
     private func updateLaunchAtLoginUI(errorMessage: String? = nil) {
         let status = SMAppService.mainApp.status
 
@@ -515,50 +642,46 @@ final class GeneralViewController: NSViewController {
     //
     // Changes require a Dock restart to take effect (`killall Dock`).
 
+    /// The Dock preference key that controls autohide animation duration.
+    private let dockAutohideKey  = "autohide-time-modifier" as CFString
+
+    /// The Dock's preference domain identifier.
+    private let dockBundleID     = "com.apple.dock" as CFString
+
     /// Checks whether the Dock's autohide animation is set to instant (0.0 seconds).
     private func isDockInstantHideEnabled() -> Bool {
-        let v = CFPreferencesCopyAppValue(
-            "autohide-time-modifier" as CFString,
-            "com.apple.dock" as CFString
-        )
-        return (v as? NSNumber)?.doubleValue == 0.0
+        let value = CFPreferencesCopyAppValue(dockAutohideKey, dockBundleID)
+        return (value as? NSNumber)?.doubleValue == 0.0
     }
 
     /// Sets the Dock's autohide animation duration, or removes the override entirely.
+    ///
+    /// - Parameter value: Duration in seconds, or `nil` to remove the override
+    ///   and restore system default behavior.
     private func setDockAutohideModifier(_ value: Double?) {
-        if let v = value {
-            CFPreferencesSetAppValue(
-                "autohide-time-modifier" as CFString,
-                NSNumber(value: v),
-                "com.apple.dock" as CFString
-            )
-        } else {
-            CFPreferencesSetAppValue(
-                "autohide-time-modifier" as CFString,
-                nil,
-                "com.apple.dock" as CFString
-            )
-        }
-        CFPreferencesAppSynchronize("com.apple.dock" as CFString)
+        let cfValue: CFPropertyList? = value.map { NSNumber(value: $0) }
+        CFPreferencesSetAppValue(dockAutohideKey, cfValue, dockBundleID)
+        CFPreferencesAppSynchronize(dockBundleID)
     }
 
     /// Shows or hides the "Reset to system default" link based on whether
     /// the Dock autohide modifier is currently overridden.
     private func updateDockResetLink() {
-        let hasOverride = CFPreferencesCopyAppValue(
-            "autohide-time-modifier" as CFString,
-            "com.apple.dock" as CFString
-        ) != nil
+        let hasOverride = CFPreferencesCopyAppValue(dockAutohideKey, dockBundleID) != nil
         dockResetDivider.isHidden = !hasOverride
         dockResetRow.isHidden     = !hasOverride
         (parent as? PreferencesTabViewController)?.resizeCurrent()
     }
 
     /// Prompts the user to restart the Dock so the autohide change takes effect.
+    ///
+    /// The Dock must be restarted for preference changes to be picked up.
+    /// This shows an alert with "Restart Dock Now" and "Later" buttons.
     private func promptDockRestart() {
         let alert = NSAlert()
         alert.messageText     = "Restart Dock to apply changes?"
-        alert.informativeText = "The Dock needs to restart for this setting to take effect. Your Dock will briefly disappear and reappear."
+        alert.informativeText = "The Dock needs to restart for this setting to take effect. "
+                              + "Your Dock will briefly disappear and reappear."
         alert.addButton(withTitle: "Restart Dock Now")
         alert.addButton(withTitle: "Later")
         alert.alertStyle = .informational
@@ -589,24 +712,60 @@ final class GeneralViewController: NSViewController {
 // MARK: - About Tab
 
 /// The "About" tab showing app info, version, authors, and update notice.
+///
+/// Displays the app icon, name, version, copyright, website link,
+/// author links, and a notice about manual updates.
 final class AboutViewController: NSViewController {
+
     override func loadView() { view = NSView() }
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        let appInfoStack  = buildAppInfoStack()
+        let authorsStack  = buildAuthorsStack()
+        let updateBox     = buildUpdateNoticeBox()
+
+        // --- Final layout ---
+        let outerStack = NSStackView(views: [appInfoStack, authorsStack, updateBox])
+        outerStack.orientation = .vertical
+        outerStack.alignment   = .centerX
+        outerStack.spacing     = Layout.aboutSpacing
+        outerStack.translatesAutoresizingMaskIntoConstraints = false
+        outerStack.setCustomSpacing(Layout.aboutSpacing, after: appInfoStack)
+
+        view.addSubview(outerStack)
+        NSLayoutConstraint.activate([
+            outerStack.topAnchor.constraint(equalTo: view.topAnchor,
+                                            constant: Layout.aboutTopPadding),
+            outerStack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            outerStack.leadingAnchor.constraint(equalTo: view.leadingAnchor,
+                                                constant: Layout.outerPadding),
+            outerStack.trailingAnchor.constraint(equalTo: view.trailingAnchor,
+                                                 constant: -Layout.outerPadding),
+            outerStack.bottomAnchor.constraint(equalTo: view.bottomAnchor,
+                                               constant: -Layout.aboutBottomPad),
+            updateBox.leadingAnchor.constraint(equalTo: outerStack.leadingAnchor),
+            updateBox.trailingAnchor.constraint(equalTo: outerStack.trailingAnchor),
+            view.widthAnchor.constraint(equalToConstant: Layout.windowWidth),
+        ])
+    }
+
+    // MARK: Sub-Builders
+
+    /// Builds the centered app info section: icon, name, version, copyright, website.
+    private func buildAppInfoStack() -> NSStackView {
         // App icon
         let iconView = NSImageView()
         iconView.image        = NSImage(named: "NSApplicationIcon")
         iconView.imageScaling = .scaleProportionallyDown
         NSLayoutConstraint.activate([
-            iconView.widthAnchor.constraint(equalToConstant: 80),
-            iconView.heightAnchor.constraint(equalToConstant: 80),
+            iconView.widthAnchor.constraint(equalToConstant: Layout.aboutIconSize),
+            iconView.heightAnchor.constraint(equalToConstant: Layout.aboutIconSize),
         ])
 
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
 
-        // App name and version labels
         let nameLabel = NSTextField(labelWithString: "Space Rabbit")
         nameLabel.font      = .boldSystemFont(ofSize: 15)
         nameLabel.textColor = .labelColor
@@ -615,94 +774,92 @@ final class AboutViewController: NSViewController {
         versionLabel.font      = .systemFont(ofSize: 12)
         versionLabel.textColor = .secondaryLabelColor
 
-        let copyrightLabel = NSTextField(labelWithString: "© 2026 Yaël Guilloux & Valerian Saliou")
+        let copyrightLabel = NSTextField(labelWithString: "\u{00A9} 2026 Ya\u{00EB}l Guilloux & Valerian Saliou")
         copyrightLabel.font      = .systemFont(ofSize: 11)
         copyrightLabel.textColor = .tertiaryLabelColor
 
-        let websiteLink = makeAuthorLink(name: "space-rabbit.app", url: "https://space-rabbit.app")
+        let websiteLink = makeClickableLink(name: "space-rabbit.app", url: "https://space-rabbit.app")
         websiteLink.font = .systemFont(ofSize: 11)
 
-        let appStack = NSStackView(views: [iconView, nameLabel, versionLabel, copyrightLabel, websiteLink])
-        appStack.orientation = .vertical
-        appStack.alignment   = .centerX
-        appStack.spacing     = 5
-        appStack.setCustomSpacing(10, after: iconView)
-
-        // --- Update notice box ---
-        let updateIcon = NSImageView()
-        updateIcon.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
-        updateIcon.contentTintColor = .secondaryLabelColor
-        NSLayoutConstraint.activate([
-            updateIcon.widthAnchor.constraint(equalToConstant: 14),
-            updateIcon.heightAnchor.constraint(equalToConstant: 14),
-        ])
-
-        let updateText = NSTextField(wrappingLabelWithString: "")
-        updateText.preferredMaxLayoutWidth = 340
-        updateText.stringValue  = "Space Rabbit does not update automatically. Updates must be applied manually. However, we will notify you when there is a new update available."
-        updateText.font         = .systemFont(ofSize: 11)
-        updateText.textColor    = .secondaryLabelColor
-
-        let updateRow = NSStackView(views: [updateIcon, updateText])
-        updateRow.orientation = .horizontal
-        updateRow.alignment   = .top
-        updateRow.spacing     = 6
-
-        let updateBox = NSView()
-        updateBox.wantsLayer              = true
-        updateBox.layer?.cornerRadius     = 8
-        updateBox.layer?.borderWidth      = 0.5
-        updateBox.layer?.borderColor      = NSColor.separatorColor.cgColor
-        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        updateBox.layer?.backgroundColor  = (isDark ? NSColor(white: 1, alpha: 0.02)
-                                                     : NSColor(white: 0, alpha: 0.02)).cgColor
-
-        updateRow.translatesAutoresizingMaskIntoConstraints = false
-        updateBox.addSubview(updateRow)
-        NSLayoutConstraint.activate([
-            updateRow.topAnchor.constraint(equalTo: updateBox.topAnchor, constant: 10),
-            updateRow.leadingAnchor.constraint(equalTo: updateBox.leadingAnchor, constant: 12),
-            updateRow.trailingAnchor.constraint(equalTo: updateBox.trailingAnchor, constant: -12),
-            updateRow.bottomAnchor.constraint(equalTo: updateBox.bottomAnchor, constant: -10),
-        ])
-
-        // --- Author links ---
-        let authorsStack = NSStackView(views: [
-            makeAuthorLink(name: "Yaël Guilloux",   url: "https://github.com/tahul"),
-            makeAuthorLink(name: "Valerian Saliou", url: "https://valeriansaliou.name"),
-        ])
-        authorsStack.orientation = .horizontal
-        authorsStack.spacing     = 16
-
-        // --- Final layout ---
-        let outerStack = NSStackView(views: [appStack, authorsStack, updateBox])
-        outerStack.orientation = .vertical
-        outerStack.alignment   = .centerX
-        outerStack.spacing     = 20
-        outerStack.translatesAutoresizingMaskIntoConstraints = false
-        outerStack.setCustomSpacing(20, after: appStack)
-
-        view.addSubview(outerStack)
-        NSLayoutConstraint.activate([
-            outerStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 24),
-            outerStack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            outerStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            outerStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            outerStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -24),
-            updateBox.leadingAnchor.constraint(equalTo: outerStack.leadingAnchor),
-            updateBox.trailingAnchor.constraint(equalTo: outerStack.trailingAnchor),
-            view.widthAnchor.constraint(equalToConstant: 480),
-        ])
+        let stack = NSStackView(views: [iconView, nameLabel, versionLabel, copyrightLabel, websiteLink])
+        stack.orientation = .vertical
+        stack.alignment   = .centerX
+        stack.spacing     = 5
+        stack.setCustomSpacing(10, after: iconView)
+        return stack
     }
 
-    /// Creates a clickable author link as an NSTextField with a URL attribute.
-    private func makeAuthorLink(name: String, url: String) -> NSTextField {
+    /// Builds the horizontal row of author links.
+    private func buildAuthorsStack() -> NSStackView {
+        let stack = NSStackView(views: [
+            makeClickableLink(name: "Ya\u{00EB}l Guilloux",   url: "https://github.com/tahul"),
+            makeClickableLink(name: "Valerian Saliou", url: "https://valeriansaliou.name"),
+        ])
+        stack.orientation = .horizontal
+        stack.spacing     = 16
+        return stack
+    }
+
+    /// Builds the info box explaining that updates are manual.
+    private func buildUpdateNoticeBox() -> NSView {
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "arrow.down.circle",
+                             accessibilityDescription: nil)
+        icon.contentTintColor = .secondaryLabelColor
+        NSLayoutConstraint.activate([
+            icon.widthAnchor.constraint(equalToConstant: 14),
+            icon.heightAnchor.constraint(equalToConstant: 14),
+        ])
+
+        let text = NSTextField(wrappingLabelWithString:
+            "Space Rabbit does not update automatically. Updates must be applied manually. "
+          + "However, we will notify you when there is a new update available.")
+        text.preferredMaxLayoutWidth = 340
+        text.font      = .systemFont(ofSize: 11)
+        text.textColor = .secondaryLabelColor
+
+        let contentRow = NSStackView(views: [icon, text])
+        contentRow.orientation = .horizontal
+        contentRow.alignment   = .top
+        contentRow.spacing     = 6
+
+        // Rounded box container matching the group style
+        let box = NSView()
+        box.wantsLayer             = true
+        box.layer?.cornerRadius    = Layout.groupCornerRadius
+        box.layer?.borderWidth     = Layout.groupBorderWidth
+        box.layer?.borderColor     = NSColor.separatorColor.cgColor
+
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        box.layer?.backgroundColor = (isDark ? NSColor(white: 1, alpha: 0.02)
+                                             : NSColor(white: 0, alpha: 0.02)).cgColor
+
+        contentRow.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(contentRow)
+        NSLayoutConstraint.activate([
+            contentRow.topAnchor.constraint(equalTo: box.topAnchor, constant: 10),
+            contentRow.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
+            contentRow.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
+            contentRow.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -10),
+        ])
+        return box
+    }
+
+    // MARK: Helpers
+
+    /// Creates a clickable link as an `NSTextField` with a URL attribute.
+    ///
+    /// - Parameters:
+    ///   - name: Display text for the link.
+    ///   - url: Destination URL string.
+    /// - Returns: A text field that renders as a clickable hyperlink.
+    private func makeClickableLink(name: String, url: String) -> NSTextField {
         let field = LinkTextField(labelWithString: "")
-        field.isSelectable              = true
+        field.isSelectable                = true
         field.allowsEditingTextAttributes = true
-        field.attributedStringValue     = NSAttributedString(string: name, attributes: [
-            .font:  NSFont.systemFont(ofSize: 12),
-            .link:  URL(string: url)!,
+        field.attributedStringValue       = NSAttributedString(string: name, attributes: [
+            .font: NSFont.systemFont(ofSize: 12),
+            .link: URL(string: url)!,
         ])
         return field
     }
@@ -710,7 +867,7 @@ final class AboutViewController: NSViewController {
 
 // MARK: - Custom Controls
 
-/// An NSTextField subclass that shows a pointing-hand cursor on hover.
+/// An `NSTextField` subclass that shows a pointing-hand cursor on hover.
 /// Used for author/website links in the About tab.
 final class LinkTextField: NSTextField {
     override func resetCursorRects() {
@@ -718,7 +875,7 @@ final class LinkTextField: NSTextField {
     }
 }
 
-/// An NSButton subclass that shows a pointing-hand cursor on hover.
+/// An `NSButton` subclass that shows a pointing-hand cursor on hover.
 /// Used for the "Reset to system default" link in the General tab.
 final class LinkButton: NSButton {
     override func resetCursorRects() {

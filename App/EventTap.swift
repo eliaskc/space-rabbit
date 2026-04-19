@@ -16,30 +16,48 @@
 import CoreGraphics
 import Foundation
 
+// MARK: - Constants
+
+/// The set of modifier keys we care about when matching shortcuts.
+/// Any modifier not in this set (e.g. Fn, CapsLock) is ignored,
+/// so pressing Fn+Control+Arrow still matches a Control+Arrow shortcut.
+private let kRelevantModifiers: CGEventFlags = [
+    .maskControl, .maskCommand, .maskAlternate, .maskShift
+]
+
 // MARK: - Event Tap Callback
 //
 // This is a C-compatible global function used as the CGEvent tap callback.
 // It cannot be a method or closure — the CGEvent API requires a plain
-// function pointer.
+// function pointer with the exact `CGEventTapCallBack` signature.
 
 /// CGEvent tap callback that intercepts space-switch keyboard shortcuts.
 ///
-/// Called for every keyDown event system-wide (requires Accessibility permission).
+/// Called for every `keyDown` event system-wide (requires Accessibility permission).
 /// Returns `nil` to swallow the event (preventing the default animated switch),
 /// or `Unmanaged.passUnretained(event)` to let it through unchanged.
+///
+/// - Parameters:
+///   - proxy: The event tap proxy (unused).
+///   - type: The event type — may be `keyDown`, `tapDisabledByTimeout`, etc.
+///   - event: The intercepted event.
+///   - userInfo: User-provided context pointer (unused).
+/// - Returns: The event to pass downstream, or `nil` to swallow it.
 func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType,
                       event: CGEvent, userInfo: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
-    // macOS may disable our tap if it takes too long or misbehaves.
-    // Re-enable it immediately to stay alive.
+    let passthrough = Unmanaged.passUnretained(event)
+
+    // macOS may disable our tap if it takes too long to process an event
+    // or if it suspects misbehavior. Re-enable it immediately to stay alive.
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
         if let tap = gTap { CGEvent.tapEnable(tap: tap, enable: true) }
-        return Unmanaged.passUnretained(event)
+        return passthrough
     }
 
     // Only process keyDown events when both the master switch and
-    // instant-switch feature are enabled
+    // the instant-switch feature are enabled
     guard type == .keyDown, gEnabled, gInstantSwitchEnabled else {
-        return Unmanaged.passUnretained(event)
+        return passthrough
     }
 
     let flags   = event.flags
@@ -48,32 +66,36 @@ func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType,
     // Check that exactly the required modifiers are held (no extras).
     // This prevents false positives when e.g. Cmd+Control+Arrow is pressed
     // but we only want Control+Arrow.
-    let relevantMods: CGEventFlags = [.maskControl, .maskCommand, .maskAlternate, .maskShift]
-    guard flags.intersection(relevantMods) == gModMask else {
-        return Unmanaged.passUnretained(event)
+    guard flags.intersection(kRelevantModifiers) == gModMask else {
+        return passthrough
     }
 
     // Determine switch direction from keycode
     let direction: Int
     if      keycode == gKeyLeft  { direction = -1 }
     else if keycode == gKeyRight { direction = +1 }
-    else                         { return Unmanaged.passUnretained(event) }
+    else                         { return passthrough }
 
     // Bounds check: don't switch past the first or last space.
-    // If we can't determine the layout, proceed anyway (the gesture
-    // will harmlessly no-op if there's nowhere to go).
+    // If we can't determine the layout (private API failure),
+    // proceed anyway — the gesture will harmlessly no-op.
     let (spaceIDs, currentIdx) = getSpaceList()
     if currentIdx >= 0 {
         let targetIdx = currentIdx + direction
-        guard targetIdx >= 0, targetIdx < spaceIDs.count else { return nil }
+        guard targetIdx >= 0, targetIdx < spaceIDs.count else {
+            // Already at the edge — swallow the event to prevent
+            // the default animated "bounce" effect
+            return nil
+        }
     }
 
-    // Post the synthetic gesture and record the switch
+    // Post the synthetic gesture and record the switch for statistics
     if postSwitchGesture(direction: direction) {
         gLastSpaceSwitchTime = Date()
         gMenu?.recordSwitch()
     }
 
-    // Return nil to swallow the original key event (prevents the animated switch)
+    // Return nil to swallow the original key event, preventing macOS
+    // from performing its default animated space switch
     return nil
 }

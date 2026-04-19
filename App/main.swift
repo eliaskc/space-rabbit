@@ -28,27 +28,32 @@ app.setActivationPolicy(.accessory)
 // cannot be created and the app is useless. We prompt once and exit
 // if permission is not granted.
 
-let axOpts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-guard AXIsProcessTrustedWithOptions(axOpts as CFDictionary) else {
+let trustedCheckOptions = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+guard AXIsProcessTrustedWithOptions(trustedCheckOptions as CFDictionary) else {
     fputs("Space Rabbit: accessibility permission required\n", stderr)
-    fputs("  Grant in: System Settings → Privacy & Security → Accessibility\n", stderr)
+    fputs("  Grant in: System Settings > Privacy & Security > Accessibility\n", stderr)
     exit(1)
 }
 
 // MARK: - Initialization
 
-// Load the user's configured space-switch keyboard shortcuts from system preferences
+// Load the user's configured space-switch keyboard shortcuts
+// from macOS system preferences (e.g. Control+Arrow, Option+Arrow)
 loadSpaceSwitchShortcuts()
 
 // Create the menu bar status item and load persisted preferences
+// (switch count, feature toggles, etc.) from UserDefaults
 gMenu = SwoopMenu()
 
-// Check for updates 5 seconds after launch (gives the app time to settle)
+// Check for updates 5 seconds after launch, giving the app
+// time to settle before making a network request
 DispatchQueue.main.asyncAfter(deadline: .now() + 5) { checkForUpdates() }
 
-// Persist the switch count to disk every 5 minutes (reduces disk I/O
-// compared to writing on every switch)
-Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
+// Persist the switch count to disk every 5 minutes.
+// This batching reduces disk I/O compared to writing on every switch.
+// The count is also flushed on termination (see cleanup section below).
+let flushInterval: TimeInterval = 300
+Timer.scheduledTimer(withTimeInterval: flushInterval, repeats: true) { _ in
     flushSwitchCount()
 }
 
@@ -74,12 +79,12 @@ guard let tap = gTap else {
     exit(1)
 }
 
-guard let source = CFMachPortCreateRunLoopSource(nil, tap, 0) else {
+guard let runLoopSource = CFMachPortCreateRunLoopSource(nil, tap, 0) else {
     fputs("Space Rabbit: failed to create run loop source\n", stderr)
     exit(1)
 }
 
-CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
 CGEvent.tapEnable(tap: tap, enable: true)
 
 // MARK: - App Activation Observer (Auto-Follow)
@@ -97,7 +102,8 @@ NSWorkspace.shared.notificationCenter.addObserver(
 
 // Also stamp the switch time on any space change (covers trackpad swipes,
 // which bypass the event tap entirely). This notification arrives before
-// the app activation notification, so the auto-follow guard fires correctly.
+// the app activation notification, so the auto-follow suppression guard
+// fires correctly for trackpad-initiated switches too.
 NSWorkspace.shared.notificationCenter.addObserver(
     forName: NSWorkspace.activeSpaceDidChangeNotification,
     object: nil, queue: .main
@@ -106,6 +112,8 @@ NSWorkspace.shared.notificationCenter.addObserver(
 // MARK: - Cleanup on Exit
 //
 // Flush stats to disk and tear down the event tap when the app terminates.
+// This ensures we don't lose switch count data and cleanly remove
+// ourselves from the event tap chain.
 
 NotificationCenter.default.addObserver(
     forName: NSApplication.willTerminateNotification,
@@ -114,12 +122,13 @@ NotificationCenter.default.addObserver(
     flushSwitchCount()
     NSWorkspace.shared.notificationCenter.removeObserver(observer)
     CGEvent.tapEnable(tap: tap, enable: false)
-    CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+    CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
 }
 
 // MARK: - Signal Handling
 //
 // Gracefully terminate on SIGINT/SIGTERM so the cleanup handler runs.
+// Without this, a `kill` or Ctrl+C would skip the willTerminate notification.
 
 /// Signal handler — must be a global C-compatible function.
 func onSignal(_ sig: Int32) {
