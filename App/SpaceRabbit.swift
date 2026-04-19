@@ -1089,20 +1089,26 @@ private func postGesturePair(flagDirection: Int64, phase: Int64,
     return true
 }
 
-private func postSwitchGesture(direction: Int) -> Bool {
-    let isRight       = direction > 0
+private let kBaseSwitchVelocity: Double = 400.0
+
+private func postSwitchGesture(direction: Int,
+                               velocity: Double = kBaseSwitchVelocity) -> Bool {
+    let isRight              = direction > 0
     let flagDirection: Int64 = isRight ? 1 : 0
-    let progress      = isRight ? 2.0 : -2.0
-    let velocity      = isRight ? 400.0 : -400.0
+    let progress             = isRight ? 2.0 : -2.0
+    let signedVelocity       = isRight ? velocity : -velocity
 
     return postGesturePair(flagDirection: flagDirection, phase: kCGSGesturePhaseBegan,
                            progress: 0, velocity: 0)
         && postGesturePair(flagDirection: flagDirection, phase: kCGSGesturePhaseEnded,
-                           progress: progress, velocity: velocity)
+                           progress: progress, velocity: signedVelocity)
 }
 
 func switchNSpaces(direction: Int, steps: Int) {
-    for i in 0..<steps where !postSwitchGesture(direction: direction) {
+    // Scale velocity with distance so the Dock snaps straight to the target
+    // instead of interpolating between intermediate spaces for large jumps.
+    let velocity = kBaseSwitchVelocity * Double(max(steps, 1))
+    for i in 0..<steps where !postSwitchGesture(direction: direction, velocity: velocity) {
         fputs("Space Rabbit: gesture failed at step \(i + 1)/\(steps)\n", stderr)
         break
     }
