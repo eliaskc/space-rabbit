@@ -71,6 +71,8 @@ var gSwitchCountSaved:     Int          = 0
 var gKeyLeft:              Int64        = 123
 var gKeyRight:             Int64        = 124
 var gModMask:              CGEventFlags = .maskControl
+// Switch to Desktop 1..10 bindings; nil = not bound in System Settings.
+var gSpaceKeys: [(keycode: Int64, mods: CGEventFlags)?] = Array(repeating: nil, count: 10)
 var gMenu:                 SwoopMenu?
 
 // MARK: - Menu bar UI
@@ -932,6 +934,17 @@ func loadSpaceSwitchShortcuts() {
 
     if !leftMods.isEmpty       { gModMask = leftMods  }
     else if !rightMods.isEmpty { gModMask = rightMods }
+
+    // Switch to Desktop 1..10 are symbolic hotkey IDs 118..127.
+    for i in 0..<10 {
+        var kc: Int64      = -1
+        var m:  CGEventFlags = []
+        readHotkey(from: prefs, key: String(118 + i), keycode: &kc, mods: &m)
+        // Require at least one modifier to avoid intercepting bare number keys.
+        if kc != -1, !m.isEmpty {
+            gSpaceKeys[i] = (kc, m)
+        }
+    }
 }
 
 // MARK: - Space list helpers
@@ -1126,7 +1139,25 @@ func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType,
     let keycode = event.getIntegerValueField(.keyboardEventKeycode)
 
     let relevantMods: CGEventFlags = [.maskControl, .maskCommand, .maskAlternate, .maskShift]
-    guard flags.intersection(relevantMods) == gModMask else {
+    let eventMods = flags.intersection(relevantMods)
+
+    for (idx, binding) in gSpaceKeys.enumerated() {
+        guard let b = binding,
+              keycode == b.keycode,
+              eventMods == b.mods else { continue }
+
+        let (spaceIDs, currentIdx) = getSpaceList()
+        guard currentIdx >= 0, idx < spaceIDs.count else { return nil }
+        guard idx != currentIdx else { return nil }
+
+        let direction = idx > currentIdx ? 1 : -1
+        let steps     = abs(idx - currentIdx)
+        switchNSpaces(direction: direction, steps: steps)
+        gMenu?.recordSwitch()
+        return nil
+    }
+
+    guard eventMods == gModMask else {
         return Unmanaged.passUnretained(event)
     }
 
