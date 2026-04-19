@@ -2,11 +2,13 @@
  * UpdateCheck.swift — GitHub release version checking
  *
  * Checks the GitHub Releases API for a newer version of Space Rabbit.
- * If a newer DMG is available, shows a banner in the menu bar dropdown
- * with a direct download link.
  *
- * This runs once, 5 seconds after launch, on a background thread.
- * There is no periodic polling — the user must relaunch to check again.
+ * Two entry points:
+ *   - checkForUpdates()         — called once at launch (5 s delay), silently
+ *                                 shows the tray banner when a newer DMG exists.
+ *   - checkForUpdatesManually() — called from "Check for updates" in the menu,
+ *                                 reports the result via callbacks so the caller
+ *                                 can show dialogs and drive the install flow.
  */
 
 import Foundation
@@ -43,37 +45,77 @@ private func isNewerVersion(_ remote: String, than local: String) -> Bool {
         if remoteValue != localValue { return remoteValue > localValue }
     }
 
-    // All components are equal
     return false
 }
 
-// MARK: - Update Check
+// MARK: - Shared Fetch
 
-/// Fetches the latest GitHub release and compares its tag to the current version.
-///
-/// If a newer version exists with a DMG asset, shows the update banner
-/// in the menu bar dropdown. Runs on a background URLSession thread and
-/// dispatches the UI update back to the main thread.
-///
-/// Called once from `main.swift`, 5 seconds after launch.
-func checkForUpdates() {
-    guard let url = URL(string: kReleasesURL) else { return }
+/// Result of a GitHub release fetch.
+private enum ReleaseResult {
+    case newer(downloadURL: String)
+    case upToDate
+    case error
+}
 
-    URLSession.shared.dataTask(with: url) { data, _, _ in
-        guard let data,
-              let json   = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tag    = json["tag_name"] as? String,
-              let assets = json["assets"] as? [[String: Any]],
-              let dmg    = assets.first(where: {
+/// Fetches the latest GitHub release, compares it to the running version,
+/// and calls `completion` with the result on a background thread.
+private func fetchRelease(_ completion: @escaping (ReleaseResult) -> Void) {
+    guard let url = URL(string: kReleasesURL) else { completion(.error); return }
+
+    URLSession.shared.dataTask(with: url) { data, _, networkError in
+        guard networkError == nil,
+              let data,
+              let json    = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tag     = json["tag_name"] as? String,
+              let assets  = json["assets"]   as? [[String: Any]],
+              let dmg     = assets.first(where: {
                   ($0["name"] as? String)?.hasSuffix(".dmg") == true
               }),
               let downloadURL = dmg["browser_download_url"] as? String
-        else { return }
+        else {
+            completion(.error)
+            return
+        }
 
-        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
-        guard isNewerVersion(tag, than: currentVersion) else { return }
-
-        // Update the UI on the main thread
-        DispatchQueue.main.async { gMenu?.showUpdateBanner(downloadURL: downloadURL) }
+        let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        completion(isNewerVersion(tag, than: current) ? .newer(downloadURL: downloadURL) : .upToDate)
     }.resume()
+}
+
+// MARK: - Automatic Check (launch-time)
+
+/// Fetches the latest GitHub release and, if a newer DMG exists, shows the
+/// update banner in the menu bar dropdown.
+///
+/// Runs once, 5 seconds after launch, on a background URLSession thread.
+/// The UI update is dispatched back to the main thread.
+func checkForUpdates() {
+    fetchRelease { result in
+        guard case .newer(let downloadURL) = result else { return }
+        DispatchQueue.main.async { gMenu?.showUpdateBanner(downloadURL: downloadURL) }
+    }
+}
+
+// MARK: - Manual Check (user-triggered)
+
+/// Fetches the latest GitHub release and reports the result via callbacks.
+///
+/// All callbacks are delivered on the **main thread**.
+///
+/// - Parameters:
+///   - onFound:    Called with the DMG download URL when a newer version exists.
+///   - onUpToDate: Called when the running version is already the latest.
+///   - onError:    Called when the network request or JSON parsing fails.
+func checkForUpdatesManually(onFound:    @escaping (_ downloadURL: String) -> Void,
+                             onUpToDate: @escaping () -> Void,
+                             onError:    @escaping () -> Void) {
+    fetchRelease { result in
+        DispatchQueue.main.async {
+            switch result {
+            case .newer(let url): onFound(url)
+            case .upToDate:       onUpToDate()
+            case .error:          onError()
+            }
+        }
+    }
 }

@@ -85,6 +85,9 @@ final class SwoopMenu: NSObject {
     private let launchWarningItem:   NSMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let launchWarningSep:    NSMenuItem = .separator()
 
+    private let checkUpdatesItem:     NSMenuItem = NSMenuItem(title: "Check for Updates\u{2026}",
+                                                                   action: nil,
+                                                                   keyEquivalent: "")
     private var statusMenu:          NSMenu!
     private var updateDownloadURL:   String?
 
@@ -118,10 +121,10 @@ final class SwoopMenu: NSObject {
         enableItem        = NSMenuItem(title: "Enable Space Rabbit",
                                        action: #selector(toggleEnabled(_:)),
                                        keyEquivalent: "")
-        instantSwitchItem = NSMenuItem(title: "Instant space switch",
+        instantSwitchItem = NSMenuItem(title: "Instant Space Switch",
                                        action: #selector(toggleInstantSwitch(_:)),
                                        keyEquivalent: "s")
-        autoFollowItem    = NSMenuItem(title: "Auto-follow on \u{2318}\u{21E5}",
+        autoFollowItem    = NSMenuItem(title: "Auto-Follow on \u{2318}\u{21E5}",
                                        action: #selector(toggleAutoFollow(_:)),
                                        keyEquivalent: "f")
         statsItem         = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -160,12 +163,14 @@ final class SwoopMenu: NSObject {
 
     /// Wires up targets and initial toggle states for all menu items.
     private func configureMenuItemTargets() {
-        enableItem.target        = self
-        instantSwitchItem.target = self
-        instantSwitchItem.state  = gInstantSwitchEnabled ? .on : .off
-        autoFollowItem.target    = self
-        autoFollowItem.state     = gAutoFollowEnabled    ? .on : .off
-        statsItem.isEnabled      = false  // Non-interactive display item
+        enableItem.target         = self
+        instantSwitchItem.target  = self
+        instantSwitchItem.state   = gInstantSwitchEnabled ? .on : .off
+        autoFollowItem.target     = self
+        autoFollowItem.state      = gAutoFollowEnabled    ? .on : .off
+        statsItem.isEnabled       = false  // Non-interactive display item
+        checkUpdatesItem.target   = self
+        checkUpdatesItem.action   = #selector(handleCheckForUpdates)
     }
 
     /// Assigns SF Symbol icons to the feature toggle and stats menu items.
@@ -184,6 +189,11 @@ final class SwoopMenu: NSObject {
                              accessibilityDescription: nil) {
             img.isTemplate = true
             statsItem.image = img
+        }
+        if let img = NSImage(systemSymbolName: "arrow.down.circle",
+                             accessibilityDescription: nil) {
+            img.isTemplate = true
+            checkUpdatesItem.image = img
         }
     }
 
@@ -226,6 +236,28 @@ final class SwoopMenu: NSObject {
             img.isTemplate = true
             settings.image = img
         }
+        // Help submenu
+        let helpMenu = NSMenu()
+        let websiteItem = NSMenuItem(title: "Open Website",
+                                     action: #selector(openWebsite),
+                                     keyEquivalent: "")
+        websiteItem.target = self
+        if let img = NSImage(systemSymbolName: "globe", accessibilityDescription: nil) {
+            img.isTemplate = true
+            websiteItem.image = img
+        }
+        helpMenu.addItem(websiteItem)
+        helpMenu.addItem(.separator())
+        helpMenu.addItem(checkUpdatesItem)
+
+        let helpItem = NSMenuItem(title: "Help", action: nil, keyEquivalent: "")
+        if let img = NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: nil) {
+            img.isTemplate = true
+            helpItem.image = img
+        }
+        helpItem.submenu = helpMenu
+        statusMenu.addItem(helpItem)
+
         statusMenu.addItem(settings)
         statusMenu.addItem(.separator())
 
@@ -404,7 +436,7 @@ final class SwoopMenu: NSObject {
 
         if notEnabled {
             launchWarningItem.attributedTitle = NSAttributedString(
-                string: "Not auto-launching  \u{00B7}  Click to fix",
+                string: "Not Auto-Launching  \u{00B7}  Click to Fix",
                 attributes: [
                     .font:            NSFont.systemFont(ofSize: 13, weight: .medium),
                     .foregroundColor: NSColor.systemOrange,
@@ -427,7 +459,7 @@ final class SwoopMenu: NSObject {
     func showUpdateBanner(downloadURL: String) {
         updateDownloadURL = downloadURL
         updateAvailableItem.attributedTitle = NSAttributedString(
-            string: "Update available  \u{00B7}  Click to download",
+            string: "Update Available  \u{00B7}  Click to Install",
             attributes: [
                 .font:            NSFont.systemFont(ofSize: 13),
                 .foregroundColor: NSColor.labelColor,
@@ -438,10 +470,67 @@ final class SwoopMenu: NSObject {
         updateAvailableSep.isHidden  = false
     }
 
-    /// Opens the DMG download URL in the default browser.
+    @objc private func openWebsite() {
+        if let url = URL(string: "https://space-rabbit.app") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Triggers the automatic update flow for the available download URL.
     @objc private func openDownloadURL() {
-        guard let urlStr = updateDownloadURL, let url = URL(string: urlStr) else { return }
-        NSWorkspace.shared.open(url)
+        guard let urlStr = updateDownloadURL else { return }
+        startUpdate(downloadURL: urlStr)
+    }
+
+    /// Manually checks GitHub for a newer release, then prompts the user.
+    @objc private func handleCheckForUpdates() {
+        checkUpdatesItem.title     = "Checking for Updates…"
+        checkUpdatesItem.isEnabled = false
+
+        checkForUpdatesManually(
+            onFound: { [weak self] downloadURL in
+                guard let self else { return }
+                self.checkUpdatesItem.title     = "Check for Updates\u{2026}"
+                self.checkUpdatesItem.isEnabled = true
+
+                // Show the tray banner so it persists after the dialog is dismissed
+                self.showUpdateBanner(downloadURL: downloadURL)
+
+                let alert = NSAlert()
+                alert.messageText     = "Update Available"
+                alert.informativeText = "A new version of Space Rabbit is available. Download and install it now?"
+                alert.addButton(withTitle: "Install Now")
+                alert.addButton(withTitle: "Later")
+                NSApp.activate(ignoringOtherApps: true)
+                if alert.runModal() == .alertFirstButtonReturn {
+                    startUpdate(downloadURL: downloadURL)
+                }
+            },
+            onUpToDate: { [weak self] in
+                guard let self else { return }
+                self.checkUpdatesItem.title     = "Check for Updates\u{2026}"
+                self.checkUpdatesItem.isEnabled = true
+
+                let alert = NSAlert()
+                alert.messageText     = "You're Up to Date"
+                alert.informativeText = "Space Rabbit is already running the latest version."
+                alert.addButton(withTitle: "OK")
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            },
+            onError: { [weak self] in
+                guard let self else { return }
+                self.checkUpdatesItem.title     = "Check for Updates\u{2026}"
+                self.checkUpdatesItem.isEnabled = true
+
+                let alert = NSAlert()
+                alert.messageText     = "Could Not Check for Updates"
+                alert.informativeText = "Please check your internet connection and try again."
+                alert.addButton(withTitle: "OK")
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
+        )
     }
 
     // MARK: - Feature Toggle Sync
