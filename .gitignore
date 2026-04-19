@@ -6,6 +6,7 @@ Space Rabbit.app/
 Space-Rabbit.dmg
 _dmg_staging/
 spacerabbit
+.build/
 *.o
 *.dSYM/
 
