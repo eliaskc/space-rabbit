@@ -7,7 +7,7 @@ LDFLAGS     = -framework CoreGraphics -framework CoreFoundation \
               -framework ApplicationServices -framework AppKit \
               -framework ServiceManagement
 
-SRC        = App/SpaceRabbit.swift
+SRCS       = $(wildcard App/*.swift)
 BIN        = spacerabbit
 APP_NAME   = Space Rabbit
 APP_BUNDLE = $(APP_NAME).app
@@ -26,8 +26,8 @@ VERSION   ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
 
 build: $(BIN)
 
-$(BIN): $(SRC)
-	$(SWIFTC) $(SWIFTFLAGS) -o $@ $< $(LDFLAGS)
+$(BIN): $(SRCS)
+	$(SWIFTC) $(SWIFTFLAGS) -o $@ $(SRCS) $(LDFLAGS)
 
 icon: $(ICNS)
 

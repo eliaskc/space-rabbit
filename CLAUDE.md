@@ -4,7 +4,7 @@
 
 Space Rabbit is a macOS menu bar utility that removes the slide animation when switching Spaces (virtual desktops). It makes space transitions instant.
 
-It is a single-file Swift app (`App/SpaceRabbit.swift`) compiled with `swiftc` via a hand-written `Makefile`. There is no Xcode project, no SPM manifest, and no third-party dependencies. The entire application is ~1170 lines of Swift.
+It is a multi-file Swift app (in `App/`) compiled with `swiftc` via a hand-written `Makefile`. There is no Xcode project, no SPM manifest, and no third-party dependencies.
 
 ## How it works
 
@@ -90,7 +90,7 @@ Everything goes through the `Makefile`. There is no Xcode project.
 
 | Target | What it does |
 |---|---|
-| `make build` | Compiles `App/SpaceRabbit.swift` → `spacerabbit` binary |
+| `make build` | Compiles `App/*.swift` → `spacerabbit` binary |
 | `make icon` | Regenerates `Icon/AppIcon.icns` from `Icon/CreateIcon.swift` |
 | `make app` | Assembles `Space Rabbit.app` bundle, optionally code-signs |
 | `make dmg` | Creates `Space-Rabbit.dmg` with an Applications symlink |
@@ -113,16 +113,25 @@ Version is derived from `git describe --tags --abbrev=0` and substituted into `A
 
 ```
 App/
-  SpaceRabbit.swift   — entire application (~1170 lines)
-  Info.plist          — bundle metadata (version placeholder: __VERSION__)
+  main.swift            — entry point: permissions, event tap, observers, run loop
+  PrivateAPI.swift      — undocumented CGEvent fields, CGS types, dlsym resolution
+  State.swift           — global runtime state, UserDefaults keys, persistence
+  Shortcuts.swift       — reads macOS space-switch keyboard shortcuts
+  SpaceSwitching.swift  — space queries, synthetic gesture posting, navigation
+  EventTap.swift        — CGEvent tap callback (Feature 1: instant switch)
+  AutoFollow.swift      — app-activation observer (Feature 2: auto-follow)
+  MenuBar.swift         — SwoopMenu status item and dropdown menu
+  Settings.swift        — preferences window (General + About tabs)
+  UpdateCheck.swift     — GitHub release version checking
+  Info.plist            — bundle metadata (version placeholder: __VERSION__)
 Icon/
-  AppIcon.icns        — compiled icon
-  CreateIcon.swift    — generates the icns programmatically
+  AppIcon.icns          — compiled icon
+  CreateIcon.swift      — generates the icns programmatically
 Makefile
 README.md
-local.env             — git-ignored; signing credentials
-Space Rabbit.app/     — built artifact (committed for convenience)
-Space-Rabbit.dmg      — distribution artifact (committed for convenience)
+local.env               — git-ignored; signing credentials
+Space Rabbit.app/       — built artifact (committed for convenience)
+Space-Rabbit.dmg        — distribution artifact (committed for convenience)
 ```
 
 ## Authors
