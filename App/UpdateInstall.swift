@@ -2,14 +2,15 @@
  * UpdateInstall.swift — Automatic update download and installation
  *
  * Handles the full update flow when the user clicks "Update available"
- * in the menu bar dropdown:
+ * in the menu bar dropdown or "Install Now" from a manual check:
  *
  *   1. Opens a small progress window and downloads the DMG from GitHub.
  *   2. Mounts the DMG, copies the new .app over the running bundle, unmounts.
  *   3. Prompts the user to restart (dismissible — the old version keeps running).
  *
  * On failure an alert offers "Try Again" or "Cancel".
- * Cancelling at any point leaves the "Update available" banner intact.
+ * Cancelling at any point leaves the "Update available" banner intact so
+ * the user can retry later.
  */
 
 import AppKit
@@ -17,33 +18,71 @@ import Foundation
 
 // MARK: - Entry Point
 
-/// Called by MenuBar when the user clicks the "Update available" banner.
+/// Called by `SwoopMenu` when the user clicks the "Update available" banner
+/// or confirms "Install Now" from a manual update check.
+///
+/// Delegates to the shared `UpdaterWindowController`, which manages the
+/// download, installation, and UI feedback.
+///
+/// - Parameter downloadURL: Direct HTTPS URL to the DMG asset on GitHub Releases.
 func startUpdate(downloadURL: String) {
     UpdaterWindowController.shared.start(downloadURL: downloadURL)
 }
 
 // MARK: - UpdaterWindowController
 
+/// Manages the update download + install flow with a progress window.
+///
+/// Responsibilities:
+///   - Presents a non-modal progress window during download
+///   - Downloads the DMG to a temporary location via `URLSession`
+///   - Mounts the DMG, locates the `.app` inside, and atomically replaces
+///     the running bundle using `FileManager.replaceItemAt`
+///   - Offers restart after successful installation
+///   - Provides retry/cancel on failure
+///
+/// This is a singleton — only one update can be in progress at a time.
+/// Calling `start(downloadURL:)` while an existing download is running
+/// cancels the previous one and begins fresh.
 final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownloadDelegate {
 
     static let shared = UpdaterWindowController()
 
-    // MARK: UI
+    // MARK: UI Elements
 
+    /// Small progress window shown during download and installation.
     private let window:       NSWindow
+
+    /// Label showing the current phase: "Downloading…", "Installing…", etc.
     private let statusLabel:  NSTextField
+
+    /// Horizontal progress bar — indeterminate until download progress is known.
     private let progressBar:  NSProgressIndicator
+
+    /// Cancel button — disabled once installation begins (file writes in progress).
     private let cancelButton: NSButton
 
     // MARK: State
 
+    /// The URLSession managing the current download. Set to `nil` when idle.
     private var session:      URLSession?
+
+    /// The active download task. Set to `nil` when idle.
     private var downloadTask: URLSessionDownloadTask?
+
+    /// The URL being downloaded — retained so "Try Again" can restart the flow.
     private var currentURL:   String?
-    private var isInstalling  = false   // true while files are being written (block window close)
+
+    /// `true` while files are being written to disk. When set, the window's
+    /// close button and cancel button are both disabled to prevent corruption.
+    private var isInstalling  = false
 
     // MARK: - Init
 
+    /// Builds the progress window and its subviews.
+    ///
+    /// The window is 400×130 pt, closable, and not released when closed
+    /// (so it can be re-shown on retry). All subviews use Auto Layout.
     private override init() {
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 400, height: 130),
@@ -64,8 +103,9 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
         progressBar.isIndeterminate = true
         progressBar.translatesAutoresizingMaskIntoConstraints = false
 
+        // Escape key dismisses the window (standard macOS convention)
         cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
-        cancelButton.keyEquivalent = "\u{1b}"   // Escape
+        cancelButton.keyEquivalent = "\u{1b}"
         cancelButton.translatesAutoresizingMaskIntoConstraints = false
 
         super.init()
@@ -74,6 +114,7 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
         cancelButton.action = #selector(cancelTapped)
         window.delegate     = self
 
+        // Layout: status label → progress bar → cancel button, vertically stacked
         let content = window.contentView!
         content.addSubview(statusLabel)
         content.addSubview(progressBar)
@@ -97,26 +138,35 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
     // MARK: - Start
 
     /// Resets the window state and begins a fresh download.
-    /// Safe to call while a previous download is already in progress.
+    ///
+    /// Safe to call while a previous download is already in progress —
+    /// the old session is silently cancelled before starting the new one.
+    ///
+    /// - Parameter downloadURL: Direct HTTPS URL to the DMG asset.
     func start(downloadURL: String) {
         currentURL   = downloadURL
         isInstalling = false
 
-        // Cancel any in-flight session silently (won't fire the error delegate)
+        // Cancel any in-flight session silently. `invalidateAndCancel` prevents
+        // the error delegate from firing for the cancelled download.
         session?.invalidateAndCancel()
         session      = nil
         downloadTask = nil
 
-        // Reset UI to initial state
+        // Reset UI to initial downloading state
         statusLabel.stringValue     = "Downloading update…"
         progressBar.isIndeterminate = true
         progressBar.startAnimation(nil)
         cancelButton.isEnabled      = true
 
+        // Center and bring the progress window to the front
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
+        // Create a new URLSession with ourselves as the download delegate.
+        // We use a dedicated session (not URLSession.shared) so we can
+        // invalidate it cleanly on cancel without affecting other networking.
         guard let url = URL(string: downloadURL) else { return }
         let s    = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
         session  = s
@@ -126,20 +176,33 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
 
     // MARK: - Cancel
 
+    /// Called when the user clicks "Cancel" or presses Escape.
+    ///
+    /// Tears down the active download session and closes the window.
+    /// Does nothing if installation is already in progress (files being written).
+    /// The "Update available" banner stays visible so the user can retry later.
     @objc private func cancelTapped() {
+        // Block cancel once file writes have begun — closing mid-install
+        // could leave the app bundle in a corrupt state
         guard !isInstalling else { return }
+
         session?.invalidateAndCancel()
         session      = nil
         downloadTask = nil
         window.close()
-        // Banner stays visible — update is still available
     }
 
     // MARK: - NSWindowDelegate
 
-    /// Blocks the close button while files are being written to disk.
+    /// Prevents closing the window while files are being written to disk.
+    ///
+    /// - Parameter sender: The window requesting close permission.
+    /// - Returns: `true` if the window may close, `false` to block it.
     func windowShouldClose(_ sender: NSWindow) -> Bool { !isInstalling }
 
+    /// Tears down the download session when the window is closed.
+    ///
+    /// Only fires if `windowShouldClose` returned `true` (i.e. not mid-install).
     func windowWillClose(_ notification: Notification) {
         guard !isInstalling else { return }
         session?.invalidateAndCancel()
@@ -147,15 +210,29 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
         downloadTask = nil
     }
 
-    // MARK: - URLSessionDownloadDelegate
+    // MARK: - URLSessionDownloadDelegate — Progress
 
+    /// Updates the progress bar as download bytes arrive.
+    ///
+    /// Switches the progress bar from indeterminate to determinate once
+    /// the server provides a `Content-Length` (i.e. `totalBytesExpectedToWrite > 0`).
+    ///
+    /// - Parameters:
+    ///   - session: The URL session managing the download.
+    ///   - downloadTask: The download task that received data.
+    ///   - bytesWritten: Bytes written since the last callback.
+    ///   - totalBytesWritten: Cumulative bytes written so far.
+    ///   - totalBytesExpectedToWrite: Total expected bytes, or -1 if unknown.
     func urlSession(_ session: URLSession,
                     downloadTask: URLSessionDownloadTask,
                     didWriteData bytesWritten: Int64,
                     totalBytesWritten: Int64,
                     totalBytesExpectedToWrite: Int64) {
+        // Skip progress updates when the server doesn't provide Content-Length
         guard totalBytesExpectedToWrite > 0 else { return }
+
         let fraction = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+
         DispatchQueue.main.async {
             self.progressBar.isIndeterminate = false
             self.progressBar.minValue        = 0
@@ -164,14 +241,28 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
         }
     }
 
+    // MARK: - URLSessionDownloadDelegate — Completion
+
+    /// Called when the download finishes successfully.
+    ///
+    /// The downloaded file at `location` is ephemeral and will be deleted by
+    /// the system after this method returns, so we immediately move it to a
+    /// stable temporary path before beginning installation.
+    ///
+    /// - Parameters:
+    ///   - session: The URL session managing the download.
+    ///   - downloadTask: The completed download task.
+    ///   - location: Temporary file URL where the downloaded DMG was saved.
     func urlSession(_ session: URLSession,
                     downloadTask: URLSessionDownloadTask,
                     didFinishDownloadingTo location: URL) {
-        // Move to a stable temp path — the provided location is ephemeral
+        // Move the downloaded DMG to a known temp path — the system-provided
+        // `location` is deleted as soon as this delegate method returns
         let dmgPath = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("SpaceRabbitUpdate.dmg")
 
         do {
+            // Remove any leftover DMG from a previous failed attempt
             if FileManager.default.fileExists(atPath: dmgPath.path) {
                 try FileManager.default.removeItem(at: dmgPath)
             }
@@ -181,6 +272,8 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
             return
         }
 
+        // Transition to the installation phase: disable cancel and show
+        // indeterminate progress while files are being copied
         DispatchQueue.main.async {
             self.isInstalling               = true
             self.statusLabel.stringValue    = "Installing…"
@@ -189,25 +282,50 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
             self.cancelButton.isEnabled     = false
         }
 
-        // Install runs synchronously on the URLSession background thread
+        // The install runs synchronously on the URLSession's background
+        // delegate queue — this keeps the main thread free for UI updates
         install(dmgPath: dmgPath)
     }
 
+    /// Called when the download task completes (with or without error).
+    ///
+    /// Only triggers error UI for genuine failures — user-initiated cancellation
+    /// (via `invalidateAndCancel`) produces `NSURLErrorCancelled`, which we
+    /// silently ignore.
+    ///
+    /// - Parameters:
+    ///   - session: The URL session managing the download.
+    ///   - task: The completed task.
+    ///   - error: The error that caused the failure, or `nil` on success.
     func urlSession(_ session: URLSession,
                     task: URLSessionTask,
                     didCompleteWithError error: Error?) {
         guard let error else { return }
-        // User-initiated cancellation — no error UI needed
+
+        // NSURLErrorCancelled means the user clicked "Cancel" — no error UI needed
         guard (error as NSError).code != NSURLErrorCancelled else { return }
         reportFailure()
     }
 
     // MARK: - Install
 
-    /// Mounts the DMG, copies the .app over the running bundle, then unmounts.
-    /// Runs on a background thread (URLSession delegate queue).
+    /// Mounts the DMG, copies the `.app` over the running bundle, then unmounts.
+    ///
+    /// This runs on a background thread (the URLSession delegate queue).
+    /// On success, prompts the user to restart on the main thread.
+    /// On failure, shows an error alert with "Try Again" / "Cancel".
+    ///
+    /// The installation steps:
+    ///   1. Mount the DMG using `hdiutil attach` (no Finder browsing)
+    ///   2. Locate the `.app` bundle inside the mounted volume
+    ///   3. Copy the new `.app` to a staging path next to the current bundle
+    ///   4. Atomically swap the staged bundle into place via `replaceItemAt`
+    ///   5. Clean up: unmount the DMG and delete the temp file
+    ///   6. Prompt the user to restart
+    ///
+    /// - Parameter dmgPath: Path to the downloaded DMG in the temp directory.
     private func install(dmgPath: URL) {
-        // 1. Mount the DMG
+        // Step 1: Mount the DMG in the background (no Finder window, no auto-open)
         let mountOutput = shell("/usr/bin/hdiutil",
                                 ["attach", "-nobrowse", "-noautoopen", dmgPath.path])
 
@@ -217,7 +335,8 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
             return
         }
 
-        // 2. Locate the .app bundle inside the mounted volume
+        // Step 2: Find the .app bundle inside the mounted volume.
+        // There should be exactly one — GitHub release DMGs contain only the app.
         let volumeURL = URL(fileURLWithPath: mountPoint)
         guard let appEntry = (try? FileManager.default.contentsOfDirectory(atPath: mountPoint))?
                 .first(where: { $0.hasSuffix(".app") }) else {
@@ -229,11 +348,14 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
         let sourceApp = volumeURL.appendingPathComponent(appEntry)
         let destApp   = Bundle.main.bundleURL
 
-        // 3. Stage the new .app next to the current one (same volume → cheap rename)
+        // Step 3: Copy the new .app to a staging location next to the current bundle.
+        // Using the same parent directory ensures the copy and the subsequent rename
+        // happen on the same volume, making the atomic swap cheap.
         let stagedApp = destApp.deletingLastPathComponent()
             .appendingPathComponent("Space Rabbit.staged.app")
 
         do {
+            // Remove any leftover staged app from a previous failed install
             if FileManager.default.fileExists(atPath: stagedApp.path) {
                 try FileManager.default.removeItem(at: stagedApp)
             }
@@ -244,7 +366,9 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
             return
         }
 
-        // 4. Atomically swap the staged bundle into place
+        // Step 4: Atomically swap the staged bundle into place.
+        // `replaceItemAt` uses POSIX rename semantics — the swap is atomic from
+        // the filesystem's perspective, so the app bundle is never in a half-written state.
         do {
             _ = try FileManager.default.replaceItemAt(destApp, withItemAt: stagedApp)
         } catch {
@@ -254,15 +378,25 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
             return
         }
 
-        // 5. Unmount and delete the temp DMG
+        // Step 5: Clean up the mounted DMG and temp file
         cleanup(dmgPath: dmgPath, mountPoint: mountPoint)
 
-        // 6. Prompt for restart on the main thread
+        // Step 6: Ask the user to restart on the main thread
         DispatchQueue.main.async { self.showRestartPrompt() }
     }
 
     // MARK: - Post-Install Prompt
 
+    /// Shows a "Restart Now / Later" dialog after successful installation.
+    ///
+    /// If the user clicks "Restart Now", spawns a detached shell process that
+    /// waits for this process to exit, then re-opens the (now-updated) app bundle.
+    /// This two-step approach is more reliable than calling `openApplication` +
+    /// `terminate` back-to-back, where the process can die before the OS has
+    /// processed the open request.
+    ///
+    /// If the user clicks "Later", the old version keeps running — the update
+    /// will take effect the next time the app is launched.
     private func showRestartPrompt() {
         isInstalling = false
         window.close()
@@ -277,9 +411,8 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         // Spawn a detached shell that waits for this process to exit, then
-        // opens the (now-updated) bundle.  This is more reliable than calling
-        // openApplication + terminate back-to-back, where the process can die
-        // before the OS has processed the open request.
+        // re-opens the (now-updated) bundle. The 0.5 s sleep gives the process
+        // time to fully terminate before the OS tries to launch the new copy.
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/sh")
         proc.arguments     = ["-c", "sleep 0.5 && open \"$1\"", "--",
@@ -288,8 +421,17 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
         NSApp.terminate(nil)
     }
 
-    // MARK: - Error
+    // MARK: - Error Handling
 
+    /// Shows an error alert with "Try Again" and "Cancel" options.
+    ///
+    /// Called from any point in the download/install pipeline where an
+    /// unrecoverable error occurs. "Try Again" restarts the full flow
+    /// from download using the same URL. "Cancel" dismisses everything
+    /// but leaves the menu bar banner visible.
+    ///
+    /// Always dispatches to the main thread (safe to call from the
+    /// URLSession background delegate queue).
     private func reportFailure() {
         DispatchQueue.main.async {
             self.isInstalling = false
@@ -305,12 +447,21 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
             if alert.runModal() == .alertFirstButtonReturn, let url = self.currentURL {
                 self.start(downloadURL: url)
             }
-            // "Cancel" — window stays closed, banner stays visible
+            // "Cancel" — window stays closed, banner stays visible so the
+            // user can retry from the menu bar whenever they want
         }
     }
 
     // MARK: - Helpers
 
+    /// Cleans up after a download/install attempt by unmounting the DMG
+    /// and deleting the temporary file.
+    ///
+    /// Safe to call with a `nil` mount point (e.g. if mounting failed).
+    ///
+    /// - Parameters:
+    ///   - dmgPath: Path to the temporary DMG file to delete.
+    ///   - mountPoint: The `/Volumes/…` mount point to detach, or `nil` if not mounted.
     private func cleanup(dmgPath: URL, mountPoint: String?) {
         if let mp = mountPoint {
             shell("/usr/bin/hdiutil", ["detach", mp, "-force"])
@@ -319,6 +470,14 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
     }
 
     /// Runs a command synchronously and returns its stdout.
+    ///
+    /// Used to invoke `hdiutil` for DMG mount/unmount operations.
+    /// Stderr is silently discarded to avoid polluting the output.
+    ///
+    /// - Parameters:
+    ///   - executable: Absolute path to the executable (e.g. `/usr/bin/hdiutil`).
+    ///   - args: Command-line arguments to pass.
+    /// - Returns: The command's stdout as a string, or empty string on failure.
     @discardableResult
     private func shell(_ executable: String, _ args: [String]) -> String {
         let proc = Process()
@@ -326,17 +485,22 @@ final class UpdaterWindowController: NSObject, NSWindowDelegate, URLSessionDownl
         proc.executableURL  = URL(fileURLWithPath: executable)
         proc.arguments      = args
         proc.standardOutput = pipe
-        proc.standardError  = Pipe()   // suppress stderr
+        proc.standardError  = Pipe()   // suppress stderr noise
         try? proc.run()
         proc.waitUntilExit()
         return String(data: pipe.fileHandleForReading.readDataToEndOfFile(),
                       encoding: .utf8) ?? ""
     }
 
-    /// Extracts the /Volumes/… mount point from `hdiutil attach` output.
+    /// Extracts the `/Volumes/…` mount point from `hdiutil attach` output.
     ///
-    /// hdiutil prints one tab-separated row per partition:
-    ///   /dev/diskNsM  \t  FSType  \t  /Volumes/Name
+    /// `hdiutil attach` prints one tab-separated row per partition. The mount
+    /// point appears in the third column of the row containing `/Volumes/`:
+    ///
+    ///     /dev/disk4s1    Apple_HFS    /Volumes/Space Rabbit
+    ///
+    /// - Parameter output: Raw stdout from `hdiutil attach`.
+    /// - Returns: The `/Volumes/…` path, or `nil` if parsing failed.
     private func parseMountPoint(from output: String) -> String? {
         for line in output.components(separatedBy: "\n") {
             let cols = line.components(separatedBy: "\t")
